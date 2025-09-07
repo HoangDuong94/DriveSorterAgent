@@ -325,7 +325,7 @@ async function analyzeWithOpenAI(localPath, originalName, promptText) {
   return { raw: text };
 }
 
-async function analyzePdfWithOpenAIVision(pdfPath, originalName, promptText, maxPages = 0) {
+/* removed analyzePdfWithOpenAIVision(pdfPath, originalName, promptText, maxPages = 0) {
   const client = new OpenAI.OpenAI({ apiKey: requiredEnv('OPENAI_API_KEY') });
   // Convert first pages of PDF to images using pdftoppm via our ocr util
   let images = [];
@@ -355,7 +355,7 @@ async function analyzePdfWithOpenAIVision(pdfPath, originalName, promptText, max
   let parsed;
   try { parsed = parseJsonResponse(text); } catch (_) { return { ok: false, error: 'bad_json', raw: text }; }
   return { ok: true, parsed };
-}
+*/
 
 function parseJsonResponse(raw) {
   try {
