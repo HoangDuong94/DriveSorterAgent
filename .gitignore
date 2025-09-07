@@ -10,6 +10,7 @@ pnpm-debug.log*
 *.env.local
 credentials.json
 credentials*.json
+.oauth-token.json
 
 # Runtime / temp
 tmp/
@@ -25,4 +26,3 @@ Thumbs.db
 
 # Misc
 repomix-output.xml
-

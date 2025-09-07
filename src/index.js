@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { pipeline } = require('stream');
+const { pipeline, Readable } = require('stream');
 const { promisify } = require('util');
 const { google } = require('googleapis');
 const OpenAI = require('openai');
@@ -13,6 +13,7 @@ const { buildPrompt } = require('./utils/prompt');
 const { normalizeSubfolder } = require('./utils/subfolder');
 const { hashText, appendJSONL } = require('./utils/dryrun');
 const { buildTargetInventoryText } = require('./utils/inventory');
+const { buildMeta, writeMeta, writeRegistryEntry } = require('./utils/sidecar');
 
 const streamPipeline = promisify(pipeline);
 
@@ -47,16 +48,41 @@ function getMimeFromFilename(filename) {
 }
 
 async function initDrive() {
+  // Prefer OAuth user flow if configured
+  const cid = (process.env.GOOGLE_OAUTH_CLIENT_ID || '').trim();
+  const csec = (process.env.GOOGLE_OAUTH_CLIENT_SECRET || '').trim();
+  if (cid && csec) {
+    const tokenPath = process.env.GOOGLE_OAUTH_TOKEN_PATH || path.join(process.cwd(), '.oauth-token.json');
+    if (!fs.existsSync(tokenPath)) {
+      throw new Error(`OAuth Token fehlt. Bitte 'npm run auth:init' ausführen (erwartet: ${tokenPath}).`);
+    }
+    const tokens = JSON.parse(fs.readFileSync(tokenPath, 'utf-8'));
+    const { OAuth2 } = google.auth;
+    const oAuth2Client = new OAuth2(cid, csec);
+    oAuth2Client.setCredentials(tokens);
+    return google.drive({ version: 'v3', auth: oAuth2Client });
+  }
+
+  // Fallback: Service Account (may be read-only in My Drive)
   const keyFile = requiredEnv('GOOGLE_APPLICATION_CREDENTIALS');
   if (!fs.existsSync(keyFile)) {
     throw new Error(`Google credentials file not found at ${keyFile}`);
   }
-  const auth = new google.auth.GoogleAuth({
-    keyFile,
-    scopes: ['https://www.googleapis.com/auth/drive']
-  });
-  const drive = google.drive({ version: 'v3', auth });
-  return drive;
+  const subject = (process.env.GOOGLE_IMPERSONATE_SUBJECT || '').trim();
+  if (subject) {
+    const raw = fs.readFileSync(keyFile, 'utf-8');
+    const key = JSON.parse(raw);
+    const auth = new google.auth.JWT(
+      key.client_email,
+      undefined,
+      key.private_key,
+      ['https://www.googleapis.com/auth/drive'],
+      subject
+    );
+    return google.drive({ version: 'v3', auth });
+  }
+  const auth = new google.auth.GoogleAuth({ keyFile, scopes: ['https://www.googleapis.com/auth/drive'] });
+  return google.drive({ version: 'v3', auth });
 }
 
 function loadPrompt() {
@@ -90,6 +116,31 @@ function enrichDateInFilename(name, detected) {
   if (/^\d{4}-\d{2}$/.test(detected))       return `${base}-${detected}${ext}`;
   if (/^\d{4}$/.test(detected))               return `${base}-${detected}${ext}`;
   return name;
+}
+
+function stripTrailingDate(nameBase) {
+  return nameBase.replace(/-\d{4}(?:-\d{2})?(?:-\d{2})?$/, '');
+}
+
+function finalizeSteuernFilename(newFilename, taxYear, issueISO) {
+  const ext = path.extname(newFilename);
+  let base = path.basename(newFilename, ext);
+  // Entferne evtl. schon angehängte Datumsteile am Ende
+  base = stripTrailingDate(base);
+  const tax = taxYear ? String(taxYear) : '';
+  let iso = issueISO ? String(issueISO) : '';
+  // Behandle Platzhalter 01-01 als unbekanntes Issue-Datum
+  if (/^\d{4}-01-01$/.test(iso)) iso = '';
+  if (iso && tax && !iso.startsWith(tax)) {
+    return `${base}-${tax}-bescheid-${iso}${ext}`;
+  }
+  if (iso) {
+    return `${base}-${iso}${ext}`;
+  }
+  if (tax) {
+    return `${base}-${tax}${ext}`;
+  }
+  return `${base}${ext}`;
 }
 
 function isDuplicateRun(hash) { return seenByTranscript.has(hash); }
@@ -398,6 +449,23 @@ async function main() {
   console.log('> Verbinde mit Google Drive und lese Dateien...');
   const SOURCE_FOLDER_ID = await resolveFolderId(drive, SOURCE_FOLDER_ENV);
   const TARGET_ROOT_FOLDER_ID = await resolveFolderId(drive, TARGET_ROOT_FOLDER_ENV);
+
+  if (process.env.OAUTH_PREFLIGHT === '1') {
+    try {
+      const me = await drive.about.get({ fields: 'user(emailAddress,displayName)', supportsAllDrives: true });
+      console.log(`Acting as: ${me.data.user?.emailAddress} (${me.data.user?.displayName})`);
+      const t = await drive.files.create({
+        requestBody: { name: 'oauth-preflight.txt', mimeType: 'text/plain', parents: [TARGET_ROOT_FOLDER_ID] },
+        media: { mimeType: 'text/plain', body: 'ok' },
+        fields: 'id',
+        supportsAllDrives: true
+      });
+      await drive.files.delete({ fileId: t.data.id, supportsAllDrives: true });
+      console.log('Preflight: Schreiben/Löschen funktioniert.');
+    } catch (e) {
+      throw new Error('Preflight fehlgeschlagen (Drive-Schreibtest): ' + e.message);
+    }
+  }
   const files = await listFilesInFolder(drive, SOURCE_FOLDER_ID);
   if (!files.length) {
     console.log('Keine Dateien im Eingangsordner gefunden.');
@@ -408,7 +476,14 @@ async function main() {
   const tmpDir = path.join(process.cwd(), 'tmp');
   await fs.promises.mkdir(tmpDir, { recursive: true });
 
-  const summary = { processed: 0, moved: 0, skipped: 0, errors: 0, details: [] };
+  const summary = {
+    processed: 0,
+    moved: 0,
+    skipped: 0,
+    errors: 0,
+    details: [],
+    counts: { pdf_parse: 0, gcs_ocr: 0, gcs_ocr_image: 0, duplicates: 0 }
+  };
   const foldersContext = await buildTargetInventoryText(
     drive,
     TARGET_ROOT_FOLDER_ID,
@@ -434,6 +509,7 @@ async function main() {
           throw new Error('GCS_BUCKET ist nicht konfiguriert; PDF-OCR ist deaktiviert');
         }
         const res = await gcsVision.ocrPdfViaGCS(localPath, { bucket: process.env.GCS_BUCKET, prefix: process.env.GCS_PREFIX });
+        try { summary.counts.gcs_ocr += 1; } catch {}
         const ocrText = res.text || '';
 
         // Duplicate-Detection vor LLM (spart Kosten)
@@ -459,11 +535,13 @@ async function main() {
               if (res.bucket && res.inputObject) await gcsVision.deleteGcsObject(res.bucket, res.inputObject);
             } catch {}
             summary.processed += 1;
+            try { summary.counts.duplicates += 1; } catch {}
             summary.details.push({ file: file.name, duplicate_of: duplicateOf.id });
             continue;
           }
 
           if (policy === 'skip') {
+            try { summary.counts.duplicates += 1; } catch {}
             try {
               const outPrefix = (res.outputPrefix || '').replace(/^gs:\/\/[a-z0-9\-]+\//i, '');
               if (res.bucket && outPrefix) await gcsVision.deleteGcsPrefix(res.bucket, outPrefix);
@@ -486,10 +564,36 @@ async function main() {
           const dupTxt = `${path.basename(newDupName, path.extname(newDupName))}.txt`;
           await drive.files.create({
             requestBody: { name: dupTxt, parents: [textId] },
-            media: { mimeType: 'text/plain', body: Buffer.from(ocrText, 'utf-8') },
+            media: { mimeType: 'text/plain', body: Readable.from(Buffer.from(ocrText, 'utf-8')) },
             fields: 'id,name'
           });
           await renameAndMove(drive, file, newDupName, scanId, SOURCE_FOLDER_ID);
+          try { summary.counts.duplicates += 1; } catch {}
+          // Sidecars for duplicate move
+          try {
+            const nameBase = path.basename(newDupName, path.extname(newDupName));
+            const metaFromText = pdfNaming.extractMetadataFromText ? pdfNaming.extractMetadataFromText(ocrText || '') : {};
+            const metaObj = buildMeta({
+              file,
+              newFilename: newDupName,
+              year: dupYear,
+              subfolder: dupSub,
+              transcript: { sha256: (txHash || null) },
+              metaFromText,
+              ocrSource: 'gcs-ocr',
+              llm: { model: (process.env.OPENAI_MODEL || 'gpt-4.1'), latency_ms: null }
+            });
+            const writeMetaEnabled = !cfg.sidecars || cfg.sidecars.write_meta !== false;
+            if (writeMetaEnabled) {
+              await writeMeta(drive, textId, nameBase, metaObj);
+            }
+            const regCfg = (cfg.sidecars && cfg.sidecars.registry) || { enabled: true, folder_name: 'Registry' };
+            if (regCfg.enabled !== false) {
+              await writeRegistryEntry(drive, TARGET_ROOT_FOLDER_ID, (regCfg.folder_name || 'Registry'), metaObj);
+            }
+          } catch (e) {
+            console.warn('Sidecar writing failed:', e.message);
+          }
           try {
             const outPrefix = (res.outputPrefix || '').replace(/^gs:\/\/[a-z0-9\-]+\//i, '');
             if (res.bucket && outPrefix) await gcsVision.deleteGcsPrefix(res.bucket, outPrefix);
@@ -519,6 +623,9 @@ async function main() {
         // Enrich filename with date: prefer full ISO; for Steuern use year if only that is known
         const detectedForName = iso || (/steuern/i.test(subfolder) ? year : null);
         newFilename = enrichDateInFilename(newFilename, detectedForName);
+        if (/steuern/i.test(subfolder)) {
+          newFilename = finalizeSteuernFilename(newFilename, year, iso || null);
+        }
         const transcriptName = `${path.basename(newFilename, path.extname(newFilename))}.txt`;
 
         const planEnsure = [`${year}`, `${year}/${subfolder}`, `${year}/${subfolder}/Scan`, `${year}/${subfolder}/Texttranskript`];
@@ -557,10 +664,35 @@ async function main() {
         const { scanId, textId } = await ensurePathIds(drive, TARGET_ROOT_FOLDER_ID, year, subfolder);
         await drive.files.create({
           requestBody: { name: transcriptName, parents: [textId] },
-          media: { mimeType: 'text/plain', body: Buffer.from(ocrText, 'utf-8') },
+          media: { mimeType: 'text/plain', body: Readable.from(Buffer.from(ocrText, 'utf-8')) },
           fields: 'id,name'
         });
         await renameAndMove(drive, file, newFilename, scanId, SOURCE_FOLDER_ID);
+        // Sidecars (nur im RUN, nicht im DRY_RUN)
+        try {
+          const nameBase = path.basename(newFilename, path.extname(newFilename));
+          const metaFromText = pdfNaming.extractMetadataFromText ? pdfNaming.extractMetadataFromText(ocrText || '') : {};
+          const metaObj = buildMeta({
+            file,
+            newFilename,
+            year,
+            subfolder,
+            transcript: { sha256: (txHash || null) },
+            metaFromText,
+            ocrSource: 'gcs-ocr',
+            llm: { model: (process.env.OPENAI_MODEL || 'gpt-4.1'), latency_ms: (llmLatencyMs || null) }
+          });
+          const writeMetaEnabled = !cfg.sidecars || cfg.sidecars.write_meta !== false;
+          if (writeMetaEnabled) {
+            await writeMeta(drive, textId, nameBase, metaObj);
+          }
+          const regCfg = (cfg.sidecars && cfg.sidecars.registry) || { enabled: true, folder_name: 'Registry' };
+          if (regCfg.enabled !== false) {
+            await writeRegistryEntry(drive, TARGET_ROOT_FOLDER_ID, (regCfg.folder_name || 'Registry'), metaObj);
+          }
+        } catch (e) {
+          console.warn('Sidecar writing failed:', e.message);
+        }
         try {
           await drive.files.update({
             fileId: file.id,
@@ -576,6 +708,192 @@ async function main() {
           } catch {}
         }
       } else {
+        if (mime.startsWith('image/')) {
+          // --- Image OCR via GCS (+ Duplicate-Check) ---
+          if (!process.env.GCS_BUCKET) throw new Error('GCS_BUCKET ist nicht konfiguriert; Image-OCR deaktiviert');
+          const resImg = await gcsVision.ocrImageViaGCS(localPath, { bucket: process.env.GCS_BUCKET, prefix: process.env.GCS_PREFIX });
+          const ocrText = resImg.text || '';
+          const txHash = hashText(ocrText);
+          const ocrSource = 'gcs-ocr-image';
+          try { summary.counts.gcs_ocr_image += 1; } catch {}
+
+          // Duplicate-Check vor LLM (spart Kosten)
+          if (txHash && isDuplicateRun(txHash)) {
+            const cfgDup = (cfg.duplicates || {});
+            const policy = (cfgDup.policy || 'skip');
+            const duplicateOf = seenByTranscript.get(txHash);
+
+            if (DRY_RUN) {
+              console.log(`\nDUPLICATE erkannt (image): "${file.name}" ~ "${duplicateOf.name}" [hash=${txHash.slice(0,8)}]`);
+              if (process.env.DRY_RUN_OUTPUT) {
+                await appendJSONL(process.env.DRY_RUN_OUTPUT, {
+                  file: { id: file.id, name: file.name, mime },
+                  transcript: { chars: ocrText.length, sha256: txHash },
+                  duplicate_of: duplicateOf,
+                  duplicate_policy: policy,
+                  ocr_source: ocrSource,
+                  gcs: { inputObject: resImg.inputObject }
+                });
+              }
+              try { if (resImg.bucket && resImg.inputObject) await gcsVision.deleteGcsObject(resImg.bucket, resImg.inputObject); } catch {}
+              summary.processed += 1; try { summary.counts.duplicates += 1; } catch {}
+              summary.details.push({ file: file.name, duplicate_of: duplicateOf.id });
+              continue;
+            }
+
+            if (policy === 'skip') {
+              try { if (resImg.bucket && resImg.inputObject) await gcsVision.deleteGcsObject(resImg.bucket, resImg.inputObject); } catch {}
+              console.log(`\u2714 Skip (Duplicate image) "${file.name}" ~ "${duplicateOf.name}"`);
+              summary.processed += 1; try { summary.counts.duplicates += 1; } catch {}
+              continue;
+            }
+
+            // policy === 'move'
+            const iso = pdfNaming.extractMetadataFromText ? pdfNaming.extractMetadataFromText(ocrText).dateISO : null;
+            const dupYear = iso ? iso.slice(0,4) : String(new Date().getFullYear());
+            const subfolderDup = (cfgDup.subfolder_name || 'Duplikate');
+            const { scanId, textId } = await ensurePathIds(drive, TARGET_ROOT_FOLDER_ID, dupYear, subfolderDup);
+            const short = txHash.slice(0,8);
+            const base0 = sanitizeFilenameBase(path.basename(file.name, path.extname(file.name)));
+            const newName0 = `${base0}-${(cfgDup.rename_suffix || 'dup')}-${short}${path.extname(file.name)}`;
+            const transcriptName0 = `${path.basename(newName0, path.extname(newName0))}.txt`;
+            await drive.files.create({
+              requestBody: { name: transcriptName0, parents: [textId] },
+              media: { mimeType: 'text/plain', body: Readable.from(Buffer.from(ocrText, 'utf-8')) },
+              fields: 'id,name'
+            });
+            await renameAndMove(drive, file, newName0, scanId, SOURCE_FOLDER_ID);
+            // Sidecars for duplicate image move
+            try {
+              const nameBase = path.basename(newName0, path.extname(newName0));
+              const metaFromText = pdfNaming.extractMetadataFromText ? pdfNaming.extractMetadataFromText(ocrText || '') : {};
+              const metaObj = buildMeta({
+                file,
+                newFilename: newName0,
+                year: dupYear,
+                subfolder: subfolderDup,
+                transcript: { sha256: (txHash || null) },
+                metaFromText,
+                ocrSource,
+                llm: { model: (process.env.OPENAI_MODEL || 'gpt-4.1'), latency_ms: null }
+              });
+              const writeMetaEnabled = !cfg.sidecars || cfg.sidecars.write_meta !== false;
+              if (writeMetaEnabled) await writeMeta(drive, textId, nameBase, metaObj);
+              const regCfg = (cfg.sidecars && cfg.sidecars.registry) || { enabled: true, folder_name: 'Registry' };
+              if (regCfg.enabled !== false) await writeRegistryEntry(drive, TARGET_ROOT_FOLDER_ID, (regCfg.folder_name || 'Registry'), metaObj);
+            } catch (e) { console.warn('Sidecar writing failed:', e.message); }
+            try { if (resImg.bucket && resImg.inputObject) await gcsVision.deleteGcsObject(resImg.bucket, resImg.inputObject); } catch {}
+            console.log(`\u2714 Duplicate (image) verschoben nach "${dupYear}/${subfolderDup}/Scan/${newName0}"`);
+            summary.processed += 1; summary.moved += 1; try { summary.counts.duplicates += 1; } catch {}
+            continue;
+          }
+          // Kein Duplicate -> merken
+          if (txHash) rememberRun(txHash, { id: file.id, name: file.name });
+
+          // LLM-Vorschlag analog PDF
+          const t0 = Date.now();
+          const proposal = await proposeNameFromText(ocrText, file.name, foldersContext, promptText);
+          const latency = Date.now() - t0;
+          const llmModel = process.env.OPENAI_MODEL || 'gpt-4.1';
+
+          let newFilename = proposal.new_filename || file.name;
+          const ext = path.extname(file.name);
+          if (!path.extname(newFilename)) newFilename = `${newFilename}${ext}`;
+          const base = sanitizeFilenameBase(path.basename(newFilename, path.extname(newFilename)));
+          newFilename = `${base}${path.extname(newFilename)}`;
+
+          const proposedSub = proposal.subfolder || proposal.target_folder || 'Sonstiges';
+          const subfolder = normalizeSubfolder(proposedSub, cfg);
+
+          const metaFromText = pdfNaming.extractMetadataFromText ? pdfNaming.extractMetadataFromText(ocrText) : {};
+          const iso = metaFromText.dateISO || null;
+          const year0 = (proposal.year && String(proposal.year)) || (iso ? iso.slice(0,4) : String(new Date().getFullYear()));
+          const year = deriveYearForCategory(ocrText, subfolder, year0);
+
+          if (typeof enrichDateInFilename === 'function') {
+            const detected = iso || (year ? String(year) : null);
+            if (detected) newFilename = enrichDateInFilename(newFilename, detected);
+          }
+          if (/steuern/i.test(subfolder)) {
+            newFilename = finalizeSteuernFilename(newFilename, year, iso || null);
+          }
+
+          const transcriptName = `${path.basename(newFilename, path.extname(newFilename))}.txt`;
+          const planEnsure = [`${year}`, `${year}/${subfolder}`, `${year}/${subfolder}/Scan`, `${year}/${subfolder}/Texttranskript`];
+
+          if (DRY_RUN) {
+            const exists = await checkEnsureExists(drive, TARGET_ROOT_FOLDER_ID, year, subfolder);
+            console.log(`\nPLAN (image) f\u00fcr \"${file.name}\":`);
+            console.log(`  ensure: ${JSON.stringify(planEnsure)}`);
+            console.log(`  wouldMove: ${year}/${subfolder}/Scan/${newFilename}`);
+            console.log(`  wouldUploadTxt: ${year}/${subfolder}/Texttranskript/${transcriptName}`);
+            console.log(`  exists: ${JSON.stringify(exists)}`);
+            if (process.env.DRY_RUN_OUTPUT) {
+              await appendJSONL(process.env.DRY_RUN_OUTPUT, {
+                file: { id: file.id, name: file.name, mime },
+                transcript: { chars: ocrText.length, sha256: txHash },
+                proposal: { ...proposal, subfolder, year, source: 'llm' },
+                plan: { ensure: planEnsure, wouldMove: `${year}/${subfolder}/Scan/${newFilename}`, wouldUploadTxt: `${year}/${subfolder}/Texttranskript/${transcriptName}` },
+                exists,
+                llm: { model: llmModel, latency_ms: latency },
+                ocr_source: ocrSource,
+                gcs: { inputObject: resImg.inputObject }
+              });
+            }
+            try { if (resImg.bucket && resImg.inputObject) await gcsVision.deleteGcsObject(resImg.bucket, resImg.inputObject); } catch {}
+            summary.processed += 1;
+            summary.details.push({ file: file.name, planned: `${year}/${subfolder}/Scan/${newFilename}` });
+            continue;
+          }
+
+          // Ausführen (Image)
+          const { scanId, textId } = await ensurePathIds(drive, TARGET_ROOT_FOLDER_ID, year, subfolder);
+          await drive.files.create({
+            requestBody: { name: transcriptName, parents: [textId] },
+            media: { mimeType: 'text/plain', body: Readable.from(Buffer.from(ocrText, 'utf-8')) },
+            fields: 'id,name'
+          });
+          await renameAndMove(drive, file, newFilename, scanId, SOURCE_FOLDER_ID);
+          try { if (resImg.bucket && resImg.inputObject) await gcsVision.deleteGcsObject(resImg.bucket, resImg.inputObject); } catch {}
+
+          // appProperties setzen
+          try {
+            await drive.files.update({
+              fileId: file.id,
+              requestBody: {
+                appProperties: {
+                  ds_processed: '1',
+                  ds_year: String(year),
+                  ds_sub: subfolder,
+                  ds_newname: newFilename,
+                  ds_version: process.env.DS_VERSION || '2025-09-07'
+                }
+              },
+              supportsAllDrives: true
+            });
+          } catch {}
+
+          // Sidecars
+          try {
+            const nameBase = path.basename(newFilename, path.extname(newFilename));
+            const metaObj = buildMeta({
+              file,
+              newFilename,
+              year,
+              subfolder,
+              transcript: { sha256: (txHash || null) },
+              metaFromText,
+              ocrSource,
+              llm: { model: llmModel, latency_ms: latency }
+            });
+            const writeMetaEnabled = !cfg.sidecars || cfg.sidecars.write_meta !== false;
+            if (writeMetaEnabled) await writeMeta(drive, textId, nameBase, metaObj);
+            const regCfg = (cfg.sidecars && cfg.sidecars.registry) || { enabled: true, folder_name: 'Registry' };
+            if (regCfg.enabled !== false) await writeRegistryEntry(drive, TARGET_ROOT_FOLDER_ID, (regCfg.folder_name || 'Registry'), metaObj);
+          } catch (e) { console.warn('Sidecar writing failed:', e.message); }
+
+          continue;
+        }
         const t0 = Date.now();
         const analysis = await analyzeWithOpenAI(localPath, file.name, promptText);
         const llmLatencyMs = Date.now() - t0;
@@ -616,7 +934,7 @@ async function main() {
         const { scanId, textId } = await ensurePathIds(drive, TARGET_ROOT_FOLDER_ID, year, subfolder);
         await drive.files.create({
           requestBody: { name: transcriptName, parents: [textId] },
-          media: { mimeType: 'text/plain', body: Buffer.from('', 'utf-8') },
+          media: { mimeType: 'text/plain', body: Readable.from(Buffer.from('', 'utf-8')) },
           fields: 'id,name'
         });
         await renameAndMove(drive, file, newFilename, scanId, SOURCE_FOLDER_ID);
@@ -647,6 +965,8 @@ async function main() {
   console.log(`- Verarbeitet: ${summary.processed}`);
   console.log(`- Verschoben:  ${summary.moved}`);
   console.log(`- Fehler:      ${summary.errors}`);
+  console.log(`- OCR-Quellen: pdf-parse=${summary.counts?.pdf_parse||0}, gcs-ocr=${summary.counts?.gcs_ocr||0}, gcs-ocr-image=${summary.counts?.gcs_ocr_image||0}`);
+  console.log(`- Duplikate: ${summary.counts?.duplicates||0}`);
 
   if (process.env.CLEAR_GCS_PREFIX_ON_EXIT === '1') {
     const bucket = process.env.GCS_BUCKET;

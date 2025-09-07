@@ -1,4 +1,5 @@
 const path = require('path');
+const { Readable } = require('stream');
 
 function buildMeta({ file, newFilename, year, subfolder, transcript, metaFromText, ocrSource, llm }) {
   const base = path.basename(newFilename, path.extname(newFilename));
@@ -27,7 +28,7 @@ function buildMeta({ file, newFilename, year, subfolder, transcript, metaFromTex
 }
 
 async function writeMeta(drive, textFolderId, nameBase, metaObj) {
-  const body = Buffer.from(JSON.stringify(metaObj, null, 2), 'utf-8');
+  const body = Readable.from([JSON.stringify(metaObj, null, 2)]);
   await drive.files.create({
     requestBody: { name: `${nameBase}.meta.json`, parents: [textFolderId] },
     media: { mimeType: 'application/json', body },
@@ -56,7 +57,7 @@ async function writeRegistryEntry(drive, rootId, folderName, metaObj) {
   const regId = await ensureRegistryFolder(drive, rootId, folderName);
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
   const base = `${ts}-${metaObj.file_id}`;
-  const body = Buffer.from(JSON.stringify(metaObj) + '\n', 'utf-8');
+  const body = Readable.from([JSON.stringify(metaObj) + '\n']);
   await drive.files.create({
     requestBody: { name: `${base}.jsonl`, parents: [regId] },
     media: { mimeType: 'application/json', body },
@@ -65,4 +66,3 @@ async function writeRegistryEntry(drive, rootId, folderName, metaObj) {
 }
 
 module.exports = { buildMeta, writeMeta, writeRegistryEntry, ensureRegistryFolder };
-

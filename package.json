@@ -1,28 +1,31 @@
 {
-  "name": "drivesorteragent",
-  "version": "1.0.0",
-  "description": "",
-  "main": "src/index.js",
-  "scripts": {
-    "start": "node src/index.js",
-    "simulate": "node src/simulate.js",
-    "suggest": "node src/suggest_names.js",
-    "dump:gcs": "node src/dump_gcs_text.js",
-    "test": "node --test"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
-  "dependencies": {
-    "@google-cloud/storage": "^7.17.0",
-    "@google-cloud/vision": "^5.3.3",
-    "canvas": "^3.2.0",
-    "dotenv": "^17.2.2",
-    "googleapis": "^159.0.0",
-    "openai": "^5.19.1",
-    "pdf-parse": "^1.1.1",
-    "pdfjs-dist": "^5.4.149",
-    "tesseract.js": "^6.0.1"
-  }
+    "name":  "drivesorteragent",
+    "version":  "1.0.0",
+    "description":  "",
+    "main":  "src/index.js",
+    "scripts":  {
+                    "dump:gcs":  "node src/dump_gcs_text.js",
+                    "start":  "node src/index.js",
+                    "auth:init":  "node scripts/oauth_init.js",
+                    "test":  "node --test",
+                    "suggest":  "node src/suggest_names.js",
+                    "simulate":  "node src/index.js --dry-run"
+                },
+    "keywords":  [
+
+                 ],
+    "author":  "",
+    "license":  "ISC",
+    "type":  "commonjs",
+    "dependencies":  {
+                         "@google-cloud/storage":  "^7.17.0",
+                         "@google-cloud/vision":  "^5.3.3",
+                         "canvas":  "^3.2.0",
+                         "dotenv":  "^17.2.2",
+                         "googleapis":  "^159.0.0",
+                         "openai":  "^5.19.1",
+                         "pdf-parse":  "^1.1.1",
+                         "pdfjs-dist":  "^5.4.149",
+                         "tesseract.js":  "^6.0.1"
+                     }
 }
