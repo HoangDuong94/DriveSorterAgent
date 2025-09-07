@@ -1,0 +1,49 @@
+{
+  "allowed_subfolders": [
+    "Rechnungen", "Steuern", "Bank", "Versicherungen",
+    "Verträge", "Medizin", "Quittungen", "Behörden", "Sonstiges"
+  ],
+  "allow_new_subfolders": false,
+  "subfolder_synonyms": {
+    "steuer": "Steuern",
+    "steuerbescheid": "Steuern",
+    "versicherung": "Versicherungen",
+    "arzt": "Medizin",
+    "vertrag": "Verträge",
+    "receipt": "Quittungen",
+    "behoerde": "Behörden",
+    "vorsorge": "Versicherungen",
+    "pensionskasse": "Versicherungen",
+    "bvg": "Versicherungen"
+  },
+  "routing_rules": [
+    {
+      "id": "rule_stromwerk_rechnungen",
+      "match": { "sender_regex": "(?i)stromwerk|ewz|enercity" },
+      "set":   { "subfolder": "Rechnungen", "doctype": "invoice" }
+    },
+    {
+      "id": "rule_bank_statements",
+      "match": { "filename_regex": "(?i)kontoauszug|account-statement" },
+      "set":   { "subfolder": "Bank", "doctype": "bank_statement" }
+    }
+  ],
+  "prompt_overrides": {
+    "company_terms": ["Suva", "ZKB", "PostFinance"],
+    "disallowed_terms": ["Minh Hoang Duong"]
+  },
+  "duplicates": {
+    "policy": "skip",
+    "subfolder_name": "Duplikate",
+    "rename_suffix": "dup"
+  },
+  "sidecars": {
+    "write_meta": true,
+    "meta_in_text_folder": true,
+    "registry": {
+      "enabled": true,
+      "folder_name": "Registry",
+      "mode": "per-entry"
+    }
+  }
+}
