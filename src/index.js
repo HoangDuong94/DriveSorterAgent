@@ -4,7 +4,6 @@ const { pipeline, Readable } = require('stream');
 const { promisify } = require('util');
 const { google } = require('googleapis');
 const OpenAI = require('openai');
-const pdfParse = require('pdf-parse');
 const pdfNaming = require('./utils/pdfNaming');
 const gcsVision = require('./utils/gcsVision');
 require('dotenv').config();
