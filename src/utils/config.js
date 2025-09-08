@@ -24,8 +24,11 @@ function loadConfig() {
   if (typeof process.env.ALLOW_NEW_SUBFOLDERS !== 'undefined') {
     cfg.allow_new_subfolders = process.env.ALLOW_NEW_SUBFOLDERS === '1';
   }
+  // Ensure payroll categories exist
+  const ensureCat = (arr, v) => { if (!arr.includes(v)) arr.push(v); };
+  ensureCat(cfg.allowed_subfolders, 'Lohnabrechnungen');
+  ensureCat(cfg.allowed_subfolders, 'Lohnausweise');
   return cfg;
 }
 
 module.exports = { loadConfig };
-

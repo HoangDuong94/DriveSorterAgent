@@ -17,6 +17,10 @@ function normalizeSubfolder(input, cfg) {
   if (!input) return 'Sonstiges';
   const n = norm(input);
   // Heuristic keyword mapping
+  // Payroll documents
+  if (/(lohnabrechnung|gehaltsabrechnung|payslip|pay\s*slip|wage\s*slip|salary\s*slip|payroll)/i.test(input)) return 'Lohnabrechnungen';
+  if (/(lohnausweis|lohnausweise|wage\s*statement|salary\s*statement|income\s*statement)/i.test(input)) return 'Lohnausweise';
+  // Generic invoices after payroll-specific mapping
   if (/(rechnung|abrechnung|invoice|zahlung|mwst|\bbetrag\b)/i.test(input)) return 'Rechnungen';
   if (/(versicherung|police|schadennummer)/i.test(input)) return 'Versicherungen';
   if (/(kontoauszug|bank|ueberweisung|überweisung|sepa|lastschrift)/i.test(input)) return 'Bank';
