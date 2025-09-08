@@ -288,15 +288,17 @@ function sanitizeFilenameBase(name) {
 
 async function analyzeWithOpenAI(localPath, originalName, promptText) {
   const client = new OpenAI.OpenAI({ apiKey: requiredEnv('OPENAI_API_KEY') });
+  const temperature = isNaN(parseFloat(process.env.OPENAI_TEMPERATURE)) ? 0 : parseFloat(process.env.OPENAI_TEMPERATURE);
   const mime = getMimeFromFilename(originalName);
   const ext = path.extname(originalName);
 
-  // For images: send as data URL to GPT-4o-mini vision
+  // For images: send as data URL to gpt-4.1 vision
   if (mime.startsWith('image/')) {
     const b64 = fs.readFileSync(localPath, { encoding: 'base64' });
     const dataUrl = `data:${mime};base64,${b64}`;
     const resp = await client.responses.create({
-      model: 'gpt-4o-mini',
+      model: 'gpt-4.1',
+      temperature,
       input: [
         {
           role: 'user',
@@ -316,7 +318,8 @@ async function analyzeWithOpenAI(localPath, originalName, promptText) {
 
   // Fallback: send only filename info
   const resp = await client.responses.create({
-    model: 'gpt-4o-mini',
+    model: 'gpt-4.1',
+    temperature,
     input: [
       { role: 'user', content: [ { type: 'input_text', text: `${promptText}\nOriginal filename: ${originalName}` } ] }
     ]
@@ -347,7 +350,7 @@ async function analyzeWithOpenAI(localPath, originalName, promptText) {
     content.push({ type: 'input_image', image_url: dataUrl });
   }
   const resp = await client.responses.create({
-    model: 'gpt-4o-mini',
+    model: 'gpt-4.1',
     input: [ { role: 'user', content } ]
   });
   const text = resp?.output?.[0]?.content?.[0]?.text || resp?.output_text || '';
@@ -448,6 +451,14 @@ async function main() {
   console.log('> Verbinde mit Google Drive und lese Dateien...');
   const SOURCE_FOLDER_ID = await resolveFolderId(drive, SOURCE_FOLDER_ENV);
   const TARGET_ROOT_FOLDER_ID = await resolveFolderId(drive, TARGET_ROOT_FOLDER_ENV);
+
+  // Session examples: accumulate canonical decisions for current run
+  const sessionExamples = [];
+  const sessionMax = Number(process.env.OPENAI_SESSION_MAX_EXAMPLES || 1000);
+  const getExamplesText = () => sessionExamples.slice(-sessionMax).join('\n');
+  const pushExample = (year, subfolder, fileName) => {
+    try { sessionExamples.push(`${year}/${subfolder}/Scan/${fileName}`); } catch {}
+  };
 
   if (process.env.OAUTH_PREFLIGHT === '1') {
     try {
@@ -605,7 +616,8 @@ async function main() {
         // Kein Duplicate → merken
         if (txHash) rememberRun(txHash, { id: file.id, name: file.name });
         const t0 = Date.now();
-        const proposal = await proposeNameFromText(ocrText, file.name, foldersContext, promptText);
+        const promptWithExamples = `${promptText}\n\nSession-Beispiele (bisherige Entscheidungen, nur Pfade):\n${getExamplesText()}`;
+        const proposal = await proposeNameFromText(ocrText, file.name, foldersContext, promptWithExamples);
         const llmLatencyMs = Date.now() - t0;
         const llmModel = process.env.OPENAI_MODEL || 'gpt-4.1';
         newFilename = proposal.new_filename || file.name;
@@ -655,6 +667,7 @@ async function main() {
               if (res.bucket && res.inputObject) await gcsVision.deleteGcsObject(res.bucket, res.inputObject);
             } catch {}
           }
+          try { pushExample(year, subfolder, newFilename); } catch {}
           summary.processed += 1;
           summary.details.push({ file: file.name, planned: `${year}/${subfolder}/Scan/${newFilename}` });
           continue;
@@ -667,6 +680,7 @@ async function main() {
           fields: 'id,name'
         });
         await renameAndMove(drive, file, newFilename, scanId, SOURCE_FOLDER_ID);
+        try { pushExample(year, subfolder, newFilename); } catch {}
         // Sidecars (nur im RUN, nicht im DRY_RUN)
         try {
           const nameBase = path.basename(newFilename, path.extname(newFilename));
@@ -791,7 +805,8 @@ async function main() {
 
           // LLM-Vorschlag analog PDF
           const t0 = Date.now();
-          const proposal = await proposeNameFromText(ocrText, file.name, foldersContext, promptText);
+          const promptWithExamplesImg = `${promptText}\n\nSession-Beispiele (bisherige Entscheidungen, nur Pfade):\n${getExamplesText()}`;
+          const proposal = await proposeNameFromText(ocrText, file.name, foldersContext, promptWithExamplesImg);
           const latency = Date.now() - t0;
           const llmModel = process.env.OPENAI_MODEL || 'gpt-4.1';
 
@@ -840,6 +855,7 @@ async function main() {
               });
             }
             try { if (resImg.bucket && resImg.inputObject) await gcsVision.deleteGcsObject(resImg.bucket, resImg.inputObject); } catch {}
+            try { pushExample(year, subfolder, newFilename); } catch {}
             summary.processed += 1;
             summary.details.push({ file: file.name, planned: `${year}/${subfolder}/Scan/${newFilename}` });
             continue;
@@ -853,6 +869,7 @@ async function main() {
             fields: 'id,name'
           });
           await renameAndMove(drive, file, newFilename, scanId, SOURCE_FOLDER_ID);
+          try { pushExample(year, subfolder, newFilename); } catch {}
           try { if (resImg.bucket && resImg.inputObject) await gcsVision.deleteGcsObject(resImg.bucket, resImg.inputObject); } catch {}
 
           // appProperties setzen
@@ -894,9 +911,10 @@ async function main() {
           continue;
         }
         const t0 = Date.now();
-        const analysis = await analyzeWithOpenAI(localPath, file.name, promptText);
+        const promptWithExamplesOther = `${promptText}\n\nSession-Beispiele (bisherige Entscheidungen, nur Pfade):\n${getExamplesText()}`;
+        const analysis = await analyzeWithOpenAI(localPath, file.name, promptWithExamplesOther);
         const llmLatencyMs = Date.now() - t0;
-        const llmModel = 'gpt-4o-mini';
+        const llmModel = 'gpt-4.1';
         const parsed = parseJsonResponse(analysis.raw);
         newFilename = parsed.new_filename || file.name;
         const ext = path.extname(file.name);
@@ -926,6 +944,7 @@ async function main() {
               llm: { model: llmModel, latency_ms: llmLatencyMs }
             });
           }
+          try { pushExample(year, subfolder, newFilename); } catch {}
           summary.processed += 1;
           summary.details.push({ file: file.name, planned: `${year}/${subfolder}/Scan/${newFilename}` });
           continue;
@@ -937,6 +956,7 @@ async function main() {
           fields: 'id,name'
         });
         await renameAndMove(drive, file, newFilename, scanId, SOURCE_FOLDER_ID);
+        try { pushExample(year, subfolder, newFilename); } catch {}
         try {
           await drive.files.update({
             fileId: file.id,
