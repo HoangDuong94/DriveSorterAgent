@@ -117,6 +117,16 @@ function enrichDateInFilename(name, detected) {
   return name;
 }
 
+// Canonicalize issuer slugs inside filenames to keep consistent naming
+function canonicalizeIssuerSlugsInFilename(name) {
+  const mappings = [
+    { re: /\bpure[_\-]?consulting\b/gi, rep: 'pure-consulting' },
+  ];
+  let out = name;
+  for (const m of mappings) out = out.replace(m.re, m.rep);
+  return out;
+}
+
 function stripTrailingDate(nameBase) {
   return nameBase.replace(/-\d{4}(?:-\d{2})?(?:-\d{2})?$/, '');
 }
@@ -155,23 +165,23 @@ function deriveYearForCategory(transcript, subfolder, fallbackYear) {
 }
 
 async function ensurePathIds(drive, rootId, year, subfolder) {
-  const yearId = await ensureFolderExists(drive, rootId, String(year));
-  const subId  = await ensureFolderExists(drive, yearId, subfolder);
-  const scanId = await ensureFolderExists(drive, subId, 'Scan');
-  const textId = await ensureFolderExists(drive, subId, 'Texttranskript');
+  const subId  = await ensureFolderExists(drive, rootId, subfolder);
+  const yearId = await ensureFolderExists(drive, subId, String(year));
+  const scanId = await ensureFolderExists(drive, yearId, 'Scan');
+  const textId = await ensureFolderExists(drive, yearId, 'Texttranskript');
   return { yearId, subId, scanId, textId };
 }
 
 async function checkEnsureExists(drive, rootId, year, subfolder) {
   const out = {};
-  const yearId = await findFolderId(drive, rootId, String(year));
-  out[`${year}`] = !!yearId;
-  const subId = yearId ? await findFolderId(drive, yearId, subfolder) : null;
-  out[`${year}/${subfolder}`] = !!subId;
-  const scanId = subId ? await findFolderId(drive, subId, 'Scan') : null;
-  const textId = subId ? await findFolderId(drive, subId, 'Texttranskript') : null;
-  out[`${year}/${subfolder}/Scan`] = !!scanId;
-  out[`${year}/${subfolder}/Texttranskript`] = !!textId;
+  const subId = await findFolderId(drive, rootId, subfolder);
+  out[`${subfolder}`] = !!subId;
+  const yearId = subId ? await findFolderId(drive, subId, String(year)) : null;
+  out[`${subfolder}/${year}`] = !!yearId;
+  const scanId = yearId ? await findFolderId(drive, yearId, 'Scan') : null;
+  const textId = yearId ? await findFolderId(drive, yearId, 'Texttranskript') : null;
+  out[`${subfolder}/${year}/Scan`] = !!scanId;
+  out[`${subfolder}/${year}/Texttranskript`] = !!textId;
   return out;
 }
 
@@ -609,7 +619,7 @@ async function main() {
             if (res.bucket && outPrefix) await gcsVision.deleteGcsPrefix(res.bucket, outPrefix);
             if (res.bucket && res.inputObject) await gcsVision.deleteGcsObject(res.bucket, res.inputObject);
           } catch {}
-          console.log(`✔ Duplicate verschoben nach "${dupYear}/${dupSub}/Scan/${newDupName}"`);
+          console.log(`✔ Duplicate verschoben nach "${dupSub}/${dupYear}/Scan/${newDupName}"`);
           summary.processed += 1; summary.moved += 1;
           continue;
         }
@@ -637,15 +647,16 @@ async function main() {
         if (/steuern/i.test(subfolder)) {
           newFilename = finalizeSteuernFilename(newFilename, year, iso || null);
         }
+        newFilename = canonicalizeIssuerSlugsInFilename(newFilename);
         const transcriptName = `${path.basename(newFilename, path.extname(newFilename))}.txt`;
 
-        const planEnsure = [`${year}`, `${year}/${subfolder}`, `${year}/${subfolder}/Scan`, `${year}/${subfolder}/Texttranskript`];
+        const planEnsure = [`${subfolder}`, `${subfolder}/${year}`, `${subfolder}/${year}/Scan`, `${subfolder}/${year}/Texttranskript`];
         if (DRY_RUN) {
           const exists = await checkEnsureExists(drive, TARGET_ROOT_FOLDER_ID, year, subfolder);
           console.log(`\nPLAN für "${file.name}":`);
           console.log(`  ensure: ${JSON.stringify(planEnsure)}`);
-          console.log(`  wouldMove: ${year}/${subfolder}/Scan/${newFilename}`);
-          console.log(`  wouldUploadTxt: ${year}/${subfolder}/Texttranskript/${transcriptName}`);
+          console.log(`  wouldMove: ${subfolder}/${year}/Scan/${newFilename}`);
+          console.log(`  wouldUploadTxt: ${subfolder}/${year}/Texttranskript/${transcriptName}`);
           console.log(`  exists: ${JSON.stringify(exists)}`);
           if (process.env.DRY_RUN_OUTPUT) {
             const sha = hashText(ocrText);
@@ -653,9 +664,10 @@ async function main() {
               file: { id: file.id, name: file.name, mime },
               transcript: { chars: ocrText.length, sha256: sha },
               proposal: { ...proposal, subfolder, year, source: 'llm' },
-              plan: { ensure: planEnsure, wouldMove: `${year}/${subfolder}/Scan/${newFilename}`, wouldUploadTxt: `${year}/${subfolder}/Texttranskript/${transcriptName}` },
+              plan: { ensure: planEnsure, wouldMove: `${subfolder}/${year}/Scan/${newFilename}`, wouldUploadTxt: `${subfolder}/${year}/Texttranskript/${transcriptName}` },
               exists,
               llm: { model: llmModel, latency_ms: llmLatencyMs },
+              llm_prompt: promptWithExamples,
               ocr_source: res ? 'gcs-ocr' : 'pdf-parse',
               gcs: res ? { inputObject: res.inputObject, outputPrefix: res.outputPrefix } : undefined
             });
@@ -831,25 +843,27 @@ async function main() {
           if (/steuern/i.test(subfolder)) {
             newFilename = finalizeSteuernFilename(newFilename, year, iso || null);
           }
+          newFilename = canonicalizeIssuerSlugsInFilename(newFilename);
 
           const transcriptName = `${path.basename(newFilename, path.extname(newFilename))}.txt`;
-          const planEnsure = [`${year}`, `${year}/${subfolder}`, `${year}/${subfolder}/Scan`, `${year}/${subfolder}/Texttranskript`];
+          const planEnsure = [`${subfolder}`, `${subfolder}/${year}`, `${subfolder}/${year}/Scan`, `${subfolder}/${year}/Texttranskript`];
 
           if (DRY_RUN) {
             const exists = await checkEnsureExists(drive, TARGET_ROOT_FOLDER_ID, year, subfolder);
             console.log(`\nPLAN (image) f\u00fcr \"${file.name}\":`);
             console.log(`  ensure: ${JSON.stringify(planEnsure)}`);
-            console.log(`  wouldMove: ${year}/${subfolder}/Scan/${newFilename}`);
-            console.log(`  wouldUploadTxt: ${year}/${subfolder}/Texttranskript/${transcriptName}`);
+            console.log(`  wouldMove: ${subfolder}/${year}/Scan/${newFilename}`);
+            console.log(`  wouldUploadTxt: ${subfolder}/${year}/Texttranskript/${transcriptName}`);
             console.log(`  exists: ${JSON.stringify(exists)}`);
             if (process.env.DRY_RUN_OUTPUT) {
               await appendJSONL(process.env.DRY_RUN_OUTPUT, {
                 file: { id: file.id, name: file.name, mime },
                 transcript: { chars: ocrText.length, sha256: txHash },
                 proposal: { ...proposal, subfolder, year, source: 'llm' },
-                plan: { ensure: planEnsure, wouldMove: `${year}/${subfolder}/Scan/${newFilename}`, wouldUploadTxt: `${year}/${subfolder}/Texttranskript/${transcriptName}` },
+                plan: { ensure: planEnsure, wouldMove: `${subfolder}/${year}/Scan/${newFilename}`, wouldUploadTxt: `${subfolder}/${year}/Texttranskript/${transcriptName}` },
                 exists,
                 llm: { model: llmModel, latency_ms: latency },
+                llm_prompt: promptWithExamplesImg,
                 ocr_source: ocrSource,
                 gcs: { inputObject: resImg.inputObject }
               });
@@ -923,25 +937,27 @@ async function main() {
         }
         const base = sanitizeFilenameBase(path.basename(newFilename, path.extname(newFilename)));
         newFilename = `${base}${path.extname(newFilename)}`;
+        newFilename = canonicalizeIssuerSlugsInFilename(newFilename);
         const proposedSub = parsed.subfolder || parsed.target_folder || 'Sonstiges';
         const subfolder = normalizeSubfolder(proposedSub, cfg);
         const year = String(new Date().getFullYear());
-        const planEnsure = [`${year}`, `${year}/${subfolder}`, `${year}/${subfolder}/Scan`, `${year}/${subfolder}/Texttranskript`];
+        const planEnsure = [`${subfolder}`, `${subfolder}/${year}`, `${subfolder}/${year}/Scan`, `${subfolder}/${year}/Texttranskript`];
         const transcriptName = `${path.basename(newFilename, path.extname(newFilename))}.txt`;
         if (DRY_RUN) {
           const exists = await checkEnsureExists(drive, TARGET_ROOT_FOLDER_ID, year, subfolder);
           console.log(`\nPLAN für "${file.name}":`);
           console.log(`  ensure: ${JSON.stringify(planEnsure)}`);
-          console.log(`  wouldMove: ${year}/${subfolder}/Scan/${newFilename}`);
-          console.log(`  wouldUploadTxt: ${year}/${subfolder}/Texttranskript/${transcriptName}`);
+          console.log(`  wouldMove: ${subfolder}/${year}/Scan/${newFilename}`);
+          console.log(`  wouldUploadTxt: ${subfolder}/${year}/Texttranskript/${transcriptName}`);
           console.log(`  exists: ${JSON.stringify(exists)}`);
           if (process.env.DRY_RUN_OUTPUT) {
             await appendJSONL(process.env.DRY_RUN_OUTPUT, {
               file: { id: file.id, name: file.name, mime },
               proposal: { ...parsed, subfolder, year, source: 'llm' },
-              plan: { ensure: planEnsure, wouldMove: `${year}/${subfolder}/Scan/${newFilename}`, wouldUploadTxt: `${year}/${subfolder}/Texttranskript/${transcriptName}` },
+              plan: { ensure: planEnsure, wouldMove: `${subfolder}/${year}/Scan/${newFilename}`, wouldUploadTxt: `${subfolder}/${year}/Texttranskript/${transcriptName}` },
               exists,
-              llm: { model: llmModel, latency_ms: llmLatencyMs }
+              llm: { model: llmModel, latency_ms: llmLatencyMs },
+              llm_prompt: promptWithExamplesOther
             });
           }
           try { pushExample(year, subfolder, newFilename); } catch {}
@@ -1006,3 +1022,4 @@ if (require.main === module) {
     process.exit(1);
   });
 }
+
