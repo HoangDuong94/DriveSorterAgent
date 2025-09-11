@@ -41,12 +41,19 @@ function ensureGsPrefix(uri) {
   return uri.endsWith('/') ? uri : uri + '/';
 }
 
+function resolvePrefix(opts = {}) {
+  if (Object.prototype.hasOwnProperty.call(opts, 'prefix')) return opts.prefix || '';
+  if (Object.prototype.hasOwnProperty.call(process.env, 'GCS_PREFIX')) return process.env.GCS_PREFIX || '';
+  return 'drivesorter';
+}
+
 async function ocrPdfViaGCS(localPdfPath, opts = {}) {
   const bucket = opts.bucket || requiredEnv('GCS_BUCKET');
-  const prefix = (opts.prefix || process.env.GCS_PREFIX || 'drivesorter').replace(/\/*$/, '');
+  const prefixRaw = resolvePrefix(opts);
+  const prefix = String(prefixRaw).replace(/\/*$/, '');
   const jobId = `${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
-  const inputObject = `${prefix}/input/${jobId}-${path.basename(localPdfPath)}`;
-  const outputPrefix = `${prefix}/output/${jobId}/`;
+  const inputObject = `${prefix ? prefix + '/' : ''}input/${jobId}-${path.basename(localPdfPath)}`;
+  const outputPrefix = `${prefix ? prefix + '/' : ''}output/${jobId}/`;
 
   const inputGcsUri = await uploadToGCS(localPdfPath, bucket, inputObject);
 
@@ -105,9 +112,10 @@ module.exports.deleteGcsPrefix = deleteGcsPrefix;
 // --- NEW: Image OCR via GCS ---
 async function ocrImageViaGCS(localImagePath, opts = {}) {
   const bucket = opts.bucket || requiredEnv('GCS_BUCKET');
-  const prefix = (opts.prefix || process.env.GCS_PREFIX || 'drivesorter').replace(/\/*$/, '');
+  const prefixRaw = resolvePrefix(opts);
+  const prefix = String(prefixRaw).replace(/\/*$/, '');
   const jobId = `${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
-  const inputObject = `${prefix}/input/${jobId}-${path.basename(localImagePath)}`;
+  const inputObject = `${prefix ? prefix + '/' : ''}input/${jobId}-${path.basename(localImagePath)}`;
   await uploadToGCS(localImagePath, bucket, inputObject);
 
   const client = getVisionClient();

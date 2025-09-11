@@ -16,6 +16,21 @@ const { buildMeta, writeMeta, writeRegistryEntry } = require('./utils/sidecar');
 
 const streamPipeline = promisify(pipeline);
 
+// CLI arg helpers
+function getArg(name, def = undefined) {
+  const flag = `--${name}`;
+  const idx = process.argv.indexOf(flag);
+  if (idx !== -1 && idx + 1 < process.argv.length) {
+    const val = process.argv[idx + 1];
+    if (!val.startsWith('--')) return val;
+  }
+  return def;
+}
+
+function boolArg(name) {
+  return process.argv.includes(`--${name}`);
+}
+
 // Laufweite Dedup-Map über OCR-Text-Hash
 const seenByTranscript = new Map(); // hash -> { id, name, planned }
 
@@ -46,12 +61,22 @@ function getMimeFromFilename(filename) {
   }
 }
 
-async function initDrive() {
+function resolveOAuthTokenPath({ tokenPath, user }) {
+  if (tokenPath && tokenPath.trim()) return path.resolve(tokenPath);
+  const envPath = (process.env.GOOGLE_OAUTH_TOKEN_PATH || '').trim();
+  if (envPath) return path.resolve(envPath);
+  const userId = (user || process.env.GOOGLE_OAUTH_USER || process.env.DS_USER || '').trim();
+  const dir = (process.env.GOOGLE_OAUTH_TOKEN_DIR || path.join(process.cwd(), '.oauth'));
+  if (userId) return path.join(dir, `${userId}.json`);
+  return path.join(process.cwd(), '.oauth-token.json');
+}
+
+async function initDrive(opts = {}) {
   // Prefer OAuth user flow if configured
   const cid = (process.env.GOOGLE_OAUTH_CLIENT_ID || '').trim();
   const csec = (process.env.GOOGLE_OAUTH_CLIENT_SECRET || '').trim();
   if (cid && csec) {
-    const tokenPath = process.env.GOOGLE_OAUTH_TOKEN_PATH || path.join(process.cwd(), '.oauth-token.json');
+    const tokenPath = resolveOAuthTokenPath({ tokenPath: (opts && opts.tokenPath), user: (opts && opts.user) });
     if (!fs.existsSync(tokenPath)) {
       throw new Error(`OAuth Token fehlt. Bitte 'npm run auth:init' ausführen (erwartet: ${tokenPath}).`);
     }
@@ -62,26 +87,32 @@ async function initDrive() {
     return google.drive({ version: 'v3', auth: oAuth2Client });
   }
 
-  // Fallback: Service Account (may be read-only in My Drive)
-  const keyFile = requiredEnv('GOOGLE_APPLICATION_CREDENTIALS');
-  if (!fs.existsSync(keyFile)) {
-    throw new Error(`Google credentials file not found at ${keyFile}`);
-  }
-  const subject = (process.env.GOOGLE_IMPERSONATE_SUBJECT || '').trim();
-  if (subject) {
-    const raw = fs.readFileSync(keyFile, 'utf-8');
-    const key = JSON.parse(raw);
-    const auth = new google.auth.JWT(
-      key.client_email,
-      undefined,
-      key.private_key,
-      ['https://www.googleapis.com/auth/drive'],
-      subject
-    );
+  // Fallback: Service Account via keyFile OR ADC (Cloud Run)
+  const keyFile = (process.env.GOOGLE_APPLICATION_CREDENTIALS || '').trim();
+  if (keyFile) {
+    if (!fs.existsSync(keyFile)) {
+      throw new Error(`Google credentials file not found at ${keyFile}`);
+    }
+    const subject = (process.env.GOOGLE_IMPERSONATE_SUBJECT || '').trim();
+    if (subject) {
+      const raw = fs.readFileSync(keyFile, 'utf-8');
+      const key = JSON.parse(raw);
+      const auth = new google.auth.JWT(
+        key.client_email,
+        undefined,
+        key.private_key,
+        ['https://www.googleapis.com/auth/drive'],
+        subject
+      );
+      return google.drive({ version: 'v3', auth });
+    }
+    const auth = new google.auth.GoogleAuth({ keyFile, scopes: ['https://www.googleapis.com/auth/drive'] });
     return google.drive({ version: 'v3', auth });
   }
-  const auth = new google.auth.GoogleAuth({ keyFile, scopes: ['https://www.googleapis.com/auth/drive'] });
-  return google.drive({ version: 'v3', auth });
+  // ADC (e.g., Cloud Run metadata server)
+  const adcAuth = new google.auth.GoogleAuth({ scopes: ['https://www.googleapis.com/auth/drive'] });
+  const client = await adcAuth.getClient();
+  return google.drive({ version: 'v3', auth: client });
 }
 
 function loadPrompt() {
@@ -445,8 +476,8 @@ async function renameAndMove(drive, file, newName, targetFolderId, sourceFolderI
 }
 
 async function main() {
-  const SOURCE_FOLDER_ENV = requiredEnv('SOURCE_FOLDER_ID');
-  const TARGET_ROOT_FOLDER_ENV = requiredEnv('TARGET_ROOT_FOLDER_ID');
+  const SOURCE_FOLDER_ENV = process.env.SOURCE_FOLDER_ID || '';
+  const TARGET_ROOT_FOLDER_ENV = process.env.TARGET_ROOT_FOLDER_ID || '';
   const DRY_RUN = process.argv.includes('--dry-run') || process.env.DRY_RUN === '1';
   const cfg = loadConfig();
   let promptText = loadPrompt();
@@ -457,10 +488,20 @@ async function main() {
     disallowedTerms: (cfg.prompt_overrides && cfg.prompt_overrides.disallowed_terms) || []
   });
 
-  const drive = await initDrive();
+  const argUser = getArg('user') || process.env.DS_USER || process.env.GOOGLE_OAUTH_USER || '';
+  const argTokenPath = getArg('token-path');
+  const drive = await initDrive({ tokenPath: argTokenPath, user: argUser });
   console.log('> Verbinde mit Google Drive und lese Dateien...');
-  const SOURCE_FOLDER_ID = await resolveFolderId(drive, SOURCE_FOLDER_ENV);
-  const TARGET_ROOT_FOLDER_ID = await resolveFolderId(drive, TARGET_ROOT_FOLDER_ENV);
+  const cliSource = getArg('source');
+  const cliTarget = getArg('target');
+  if (!(cliSource || SOURCE_FOLDER_ENV)) {
+    throw new Error("SOURCE_FOLDER_ID fehlt; .env setzen oder --source angeben");
+  }
+  if (!(cliTarget || TARGET_ROOT_FOLDER_ENV)) {
+    throw new Error("TARGET_ROOT_FOLDER_ID fehlt; .env setzen oder --target angeben");
+  }
+  const SOURCE_FOLDER_ID = await resolveFolderId(drive, (cliSource || SOURCE_FOLDER_ENV));
+  const TARGET_ROOT_FOLDER_ID = await resolveFolderId(drive, (cliTarget || TARGET_ROOT_FOLDER_ENV));
 
   // Session examples: accumulate canonical decisions for current run
   const sessionExamples = [];
@@ -1014,6 +1055,7 @@ async function main() {
       console.warn('[GCS] Skip global cleanup: unsafe or missing prefix/bucket');
     }
   }
+  return summary;
 }
 
 if (require.main === module) {
@@ -1022,4 +1064,18 @@ if (require.main === module) {
     process.exit(1);
   });
 }
+
+// Adapter-API: kapselt main() für programmatic use
+async function runSorter(opts = {}) {
+  if (opts.sourceFolderId) process.env.SOURCE_FOLDER_ID = String(opts.sourceFolderId);
+  if (opts.targetRootFolderId) process.env.TARGET_ROOT_FOLDER_ID = String(opts.targetRootFolderId);
+  process.env.DRY_RUN = opts.dryRun ? '1' : '';
+  if (typeof opts.gcsPrefix === 'string') process.env.GCS_PREFIX = opts.gcsPrefix;
+  if (opts.userEmail) process.env.DS_USER = String(opts.userEmail);
+  // optional: wire callbacks via globals (keine harten Hooks vorhanden) – noop hier
+  const summary = await main();
+  return summary;
+}
+
+module.exports = { runSorter };
 

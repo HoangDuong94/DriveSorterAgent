@@ -5,7 +5,9 @@
     "main": "src/index.js",
     "scripts": {
         "dump:gcs": "node src/dump_gcs_text.js",
-        "start": "node src/index.js",
+        "dev": "node api/server.js",
+        "start": "node api/server.js",
+        "deploy": "gcloud run deploy drivesorter-api --source . --region=europe-west6 --service-account drivesorter-runtime@drive-sorter-agent-837493.iam.gserviceaccount.com --allow-unauthenticated --set-env-vars GCP_PROJECT_ID=drive-sorter-agent-837493,REGION=europe-west6,GCS_BUCKET=drive-sorter-agent-pdf-inbox-837493,GCS_PREFIX=,DS_VERSION=2025-09-10,ACCESS_KEYS_SOURCE=secret,ACCESS_KEYS_SECRET_NAME=drivesorter-access-keys,OPENAI_MODEL=gpt-4.1 --set-secrets OPENAI_API_KEY=openai-api-key:latest --cpu=1 --memory=2Gi --concurrency=10 --min-instances=0 --timeout=900",
         "auth:init": "node scripts/oauth_init.js",
         "test": "node --test",
         "simulate": "node src/index.js --dry-run"
@@ -15,10 +17,16 @@
     "license": "ISC",
     "type": "commonjs",
     "dependencies": {
+        "@fastify/cors": "8.4.2",
+        "@google-cloud/secret-manager": "^5.0.0",
         "@google-cloud/storage": "^7.17.0",
         "@google-cloud/vision": "^5.3.3",
         "dotenv": "^17.2.2",
+        "fastify": "^4.28.0",
         "googleapis": "^159.0.0",
-        "openai": "^5.19.1"
+        "lru-cache": "^10.3.0",
+        "openai": "^5.19.1",
+        "pino": "^9.3.0",
+        "uuid": "^9.0.1"
     }
 }
