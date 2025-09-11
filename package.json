@@ -7,7 +7,7 @@
         "dump:gcs": "node src/dump_gcs_text.js",
         "dev": "node api/server.js",
         "start": "node api/server.js",
-        "deploy": "gcloud run deploy drivesorter-api --source . --region=europe-west6 --service-account drivesorter-runtime@drive-sorter-agent-837493.iam.gserviceaccount.com --allow-unauthenticated --set-env-vars GCP_PROJECT_ID=drive-sorter-agent-837493,REGION=europe-west6,GCS_BUCKET=drive-sorter-agent-pdf-inbox-837493,GCS_PREFIX=,DS_VERSION=2025-09-10,ACCESS_KEYS_SOURCE=secret,ACCESS_KEYS_SECRET_NAME=drivesorter-access-keys,OPENAI_MODEL=gpt-4.1 --set-secrets OPENAI_API_KEY=openai-api-key:latest --cpu=1 --memory=2Gi --concurrency=10 --min-instances=0 --timeout=900",
+        "deploy": "gcloud run deploy drivesorter-api --source . --region=europe-west6 --service-account drivesorter-runtime@dokumenten-agent.iam.gserviceaccount.com --allow-unauthenticated --set-env-vars=GCP_PROJECT_ID=dokumenten-agent,REGION=europe-west6,GCS_BUCKET=drive-sorter-agent-pdf-inbox-837493,GCS_PREFIX=,DS_VERSION=2025-09-10,ACCESS_KEYS_SOURCE=secret,ACCESS_KEYS_SECRET_NAME=drivesorter-access-keys,OPENAI_MODEL=gpt-4.1 --set-secrets OPENAI_API_KEY=openai-api-key:latest --cpu=1 --memory=2Gi --concurrency=10 --min-instances=0 --timeout=900",
         "auth:init": "node scripts/oauth_init.js",
         "test": "node --test",
         "simulate": "node src/index.js --dry-run"
