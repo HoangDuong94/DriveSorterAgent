@@ -44,13 +44,34 @@ module.exports = async function (app) {
     return reply.send(st);
   });
 
+  // List recent runs for current access key
+  app.get('/runs', async (req, reply) => {
+    try {
+      const headerKey = req.headers['x-access-key'];
+      const cookieKey = req.cookies && (req.cookies.ds_session || req.cookies['ds_session']);
+      const accessKey = headerKey || cookieKey;
+      if (!accessKey) return reply.code(401).send({ error: { code: 401, message: 'unauthorized' } });
+      const accessKeyHash = sha256Hex(accessKey);
+      let limit = Number(req.query && req.query.limit || 20);
+      if (!Number.isFinite(limit)) limit = 20;
+      limit = Math.max(1, Math.min(100, Math.floor(limit)));
+      const items = await runs.listRunsByAccessKey(accessKeyHash, limit);
+      return reply.send({ ok: true, items });
+    } catch (e) {
+      req.log.error({ err: e }, 'runs-list-failed');
+      return reply.code(500).send({ error: { code: 500, message: 'runs-list-error', detail: e.message } });
+    }
+  });
+
   // New: Signed artifact URLs
   app.get('/runs/:runId/artifacts', async (req, reply) => {
     const runId = req.params.runId;
     let ttlSec = Number(req.query.ttlSec || 3600);
     if (!Number.isFinite(ttlSec)) ttlSec = 3600;
     ttlSec = Math.max(60, Math.min(86400, Math.floor(ttlSec)));
-    const accessKey = req.headers['x-access-key'];
+    const headerKey = req.headers['x-access-key'];
+    const cookieKey = req.cookies && (req.cookies.ds_session || req.cookies['ds_session']);
+    const accessKey = headerKey || cookieKey;
     const accessKeyHash = accessKey ? sha256Hex(accessKey) : null;
     try {
       const out = await runs.getArtifactsSignedUrls(runId, ttlSec, accessKeyHash);

@@ -178,3 +178,43 @@ async function getArtifactsSignedUrls(runId, ttlSec, providedAccessKeyHash) {
 }
 
 module.exports = { startDryRun, startRun, getRunStatus, getArtifactsSignedUrls };
+async function listRunsByAccessKey(accessKeyHash, limit = 20) {
+  if (!BUCKET) throw new Error('GCS_BUCKET not configured');
+  const bucket = storage.bucket(BUCKET);
+  const [files] = await bucket.getFiles({ prefix: 'runs/', autoPaginate: true });
+  const statusFiles = files.filter(f => /\/status\.json$/.test(f.name));
+  // sort by updated desc (fallback to timeCreated)
+  statusFiles.sort((a, b) => {
+    const au = new Date(a.metadata?.updated || a.metadata?.timeCreated || 0).getTime();
+    const bu = new Date(b.metadata?.updated || b.metadata?.timeCreated || 0).getTime();
+    return bu - au;
+  });
+  const out = [];
+  for (const f of statusFiles) {
+    if (out.length >= Math.max(1, Math.min(100, Number(limit) || 20))) break;
+    try {
+      const [buf] = await f.download();
+      const st = JSON.parse(buf.toString('utf8'));
+      const meta = st && st.meta || {};
+      if (!meta || meta.accessKeyHash !== accessKeyHash) continue;
+      const parts = f.name.split('/');
+      const runId = parts.length >= 2 ? parts[1] : null;
+      out.push({
+        runId,
+        state: st.state || null,
+        mode: st.mode || null,
+        updatedAt: f.metadata?.updated || f.metadata?.timeCreated || null,
+        meta: { ownerHash: meta.ownerHash || null, profileId: meta.profileId || null, email: meta.email || null },
+        summary: st.summary ? {
+          processed: st.summary.processed || 0,
+          moved: st.summary.moved || 0,
+          errors: st.summary.errors || 0,
+          counts: st.summary.counts || undefined,
+        } : undefined,
+      });
+    } catch (_) { /* ignore malformed */ }
+  }
+  return out;
+}
+
+module.exports.listRunsByAccessKey = listRunsByAccessKey;
