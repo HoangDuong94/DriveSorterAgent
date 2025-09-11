@@ -11,6 +11,7 @@ pnpm-debug.log*
 credentials.json
 credentials*.json
 .oauth-token.json
+openai.key
 
 # Runtime / temp
 tmp/
