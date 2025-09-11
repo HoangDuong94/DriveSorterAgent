@@ -5,11 +5,15 @@ module.exports = async function (app) {
   function sha256Hex(s) { return crypto.createHash('sha256').update(String(s)).digest('hex'); }
 
   app.post('/dry-run', async (req, reply) => {
-    const { email } = req.body || {};
-    if (!email) return reply.code(422).send({ error: { code: 422, message: 'missing-email' } });
-    const accessKey = req.headers['x-access-key'];
+    const body = req.body || {};
+    const { email, profileId } = body;
+    if (!email && !profileId) return reply.code(422).send({ error: { code: 422, message: 'missing-fields', detail: 'profileId|email' } });
+    const headerKey = req.headers['x-access-key'];
+    const cookieKey = req.cookies && (req.cookies.ds_session || req.cookies['ds_session']);
+    const accessKey = headerKey || cookieKey;
     const accessKeyHash = accessKey ? sha256Hex(accessKey) : null;
-    const res = await runs.startDryRun({ email, accessKeyHash });
+    const ownerHash = req.ownerHash || (accessKey ? sha256Hex(accessKey) : null);
+    const res = await runs.startDryRun({ email, profileId, ownerHash, accessKeyHash });
     if (!res.ok) {
       const status = res.error === 'config-not-found' ? 404 : 500;
       return reply.code(status).send(res);
@@ -18,11 +22,15 @@ module.exports = async function (app) {
   });
 
   app.post('/run', async (req, reply) => {
-    const { email } = req.body || {};
-    if (!email) return reply.code(422).send({ error: { code: 422, message: 'missing-email' } });
-    const accessKey = req.headers['x-access-key'];
+    const body = req.body || {};
+    const { email, profileId } = body;
+    if (!email && !profileId) return reply.code(422).send({ error: { code: 422, message: 'missing-fields', detail: 'profileId|email' } });
+    const headerKey = req.headers['x-access-key'];
+    const cookieKey = req.cookies && (req.cookies.ds_session || req.cookies['ds_session']);
+    const accessKey = headerKey || cookieKey;
     const accessKeyHash = accessKey ? sha256Hex(accessKey) : null;
-    const res = await runs.startRun({ email, accessKeyHash });
+    const ownerHash = req.ownerHash || (accessKey ? sha256Hex(accessKey) : null);
+    const res = await runs.startRun({ email, profileId, ownerHash, accessKeyHash });
     if (!res.ok) {
       const status = res.error === 'config-not-found' ? 404 : 500;
       return reply.code(status).send(res);
@@ -53,5 +61,49 @@ module.exports = async function (app) {
       req.log.error({ err: e, runId, ttlSec }, 'artifacts-url-failed');
       return reply.code(500).send({ error: { code: 500, message: 'artifacts-error', detail: e.message } });
     }
+  });
+
+  // New: SSE stream of status.json
+  app.get('/runs/:runId/stream', async (req, reply) => {
+    reply.raw.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    reply.raw.flushHeaders && reply.raw.flushHeaders();
+
+    const runId = req.params.runId;
+    let closed = false;
+    req.raw.on('close', () => { closed = true; });
+
+    const send = async () => {
+      try {
+        const st = await runs.getRunStatus(runId);
+        if (!st) {
+          reply.raw.write(`event: error\n`);
+          reply.raw.write(`data: ${JSON.stringify({ error: { code: 404, message: 'run-not-found' } })}\n\n`);
+          reply.raw.end();
+          return true;
+        }
+        reply.raw.write(`data: ${JSON.stringify(st)}\n\n`);
+        if (st && (st.state === 'succeeded' || st.state === 'failed')) {
+          reply.raw.end();
+          return true;
+        }
+      } catch (e) {
+        reply.raw.write(`event: error\n`);
+        reply.raw.write(`data: ${JSON.stringify({ error: { code: 500, message: 'stream-error', detail: e.message } })}\n\n`);
+      }
+      return false;
+    };
+
+    // initial push
+    if (await send()) return;
+    const iv = setInterval(async () => {
+      if (closed) { clearInterval(iv); return; }
+      const done = await send();
+      if (done) { clearInterval(iv); }
+    }, 1000);
   });
 };

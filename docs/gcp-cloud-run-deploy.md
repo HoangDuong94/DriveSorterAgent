@@ -169,3 +169,93 @@ gcloud logs tail --region europe-west6 --service drivesorter-api
 
 Aktuell wird der Cross‑Project Bucket `drive-sorter-agent-pdf-inbox-837493` genutzt. Optional kann ein eigener Bucket im Projekt `dokumenten-agent` angelegt und per `GCS_BUCKET` umgestellt werden.
 
+## PowerShell – sichere Deploy‑Befehle
+
+PowerShell parst Argumente anders als Bash. Für `--set-env-vars`/`--update-env-vars` gilt:
+
+- Die gesamte CSV‑Liste als EIN String in Anführungszeichen übergeben, z. B. `"KEY=VALUE,KEY2=VALUE2"`.
+- Oder jede Variable separat mit eigenem `--update-env-vars` setzen.
+
+Beispiel (sicher, mit Variablen):
+
+```
+$PROJECT = 'dokumenten-agent'
+$REGION  = 'europe-west6'
+$SERVICE = 'drivesorter-api'
+$BUCKET  = 'drive-sorter-agent-pdf-inbox-837493'
+$SA      = 'drivesorter-runtime@dokumenten-agent.iam.gserviceaccount.com'
+$DS_VERSION = Get-Date -Format 'yyyy-MM-dd'
+
+gcloud run deploy $SERVICE `
+  --source . `
+  --region $REGION `
+  --service-account $SA `
+  --allow-unauthenticated `
+  --set-env-vars "GCP_PROJECT_ID=$PROJECT,REGION=$REGION,GCS_BUCKET=$BUCKET,GCS_PREFIX=,DS_VERSION=$DS_VERSION,ACCESS_KEYS_SOURCE=secret,ACCESS_KEYS_SECRET_NAME=drivesorter-access-keys,OPENAI_MODEL=gpt-4.1,COOKIE_SECURE=1" `
+  --set-secrets OPENAI_API_KEY=openai-api-key:latest `
+  --cpu=1 --memory=2Gi --concurrency=10 --min-instances=0 --timeout=900
+```
+
+Alternative (robust):
+
+```
+gcloud run services update $SERVICE --region $REGION --update-env-vars "GCP_PROJECT_ID=$PROJECT"
+gcloud run services update $SERVICE --region $REGION --update-env-vars "REGION=$REGION"
+gcloud run services update $SERVICE --region $REGION --update-env-vars "GCS_BUCKET=$BUCKET"
+gcloud run services update $SERVICE --region $REGION --update-env-vars "GCS_PREFIX="
+gcloud run services update $SERVICE --region $REGION --update-env-vars "DS_VERSION=$(Get-Date -Format 'yyyy-MM-dd_HHmmss')"
+gcloud run services update $SERVICE --region $REGION --update-env-vars "ACCESS_KEYS_SOURCE=secret"
+gcloud run services update $SERVICE --region $REGION --update-env-vars "ACCESS_KEYS_SECRET_NAME=drivesorter-access-keys"
+gcloud run services update $SERVICE --region $REGION --update-env-vars "OPENAI_MODEL=gpt-4.1"
+gcloud run services update $SERVICE --region $REGION --update-env-vars "COOKIE_SECURE=1"
+```
+
+Env prüfen (soll z. B. `GCP_PROJECT_ID = dokumenten-agent` zeigen, nicht verkettet):
+
+```
+gcloud run services describe $SERVICE --region $REGION --format "table(spec.template.spec.containers[0].env[].name, spec.template.spec.containers[0].env[].value)"
+```
+
+## Häufiger Fehler: Verkettete Env‑Variablen
+
+- Symptom: `/readyz` → `secrets:false`, und `GCP_PROJECT_ID` enthält mehrere Werte (z. B. `"dokumenten-agent REGION=europe-west6 ..."`).
+- Ursache: `--set-env-vars` nicht korrekt gequotet → PowerShell hängt Tokens an die erste Variable.
+- Fix: Die CSV‑Liste quoten oder jede Variable einzeln updaten (siehe oben). Danach neue Revision erzeugen.
+
+## Cookie‑Secret & Secret‑IAM (Kurz)
+
+```
+# Secret anlegen + Version
+$bytes = New-Object 'Byte[]' 48; (New-Object System.Random).NextBytes($bytes)
+$COOKIE_SECRET = [Convert]::ToBase64String($bytes)
+Set-Content -NoNewline cookie-secret.txt $COOKIE_SECRET
+gcloud secrets create cookie-secret
+gcloud secrets versions add cookie-secret --data-file=cookie-secret.txt
+Remove-Item cookie-secret.txt
+
+# IAM binden und im Service referenzieren
+$SA = 'drivesorter-runtime@dokumenten-agent.iam.gserviceaccount.com'
+gcloud secrets add-iam-policy-binding cookie-secret --member "serviceAccount:$SA" --role "roles/secretmanager.secretAccessor"
+gcloud run services update $SERVICE --region $REGION --set-secrets COOKIE_SECRET=cookie-secret:latest
+
+# Access-Key/OPENAI Secrets: secretAccessor ebenfalls vergeben
+gcloud secrets add-iam-policy-binding drivesorter-access-keys --member "serviceAccount:$SA" --role "roles/secretmanager.secretAccessor"
+gcloud secrets add-iam-policy-binding openai-api-key            --member "serviceAccount:$SA" --role "roles/secretmanager.secretAccessor"
+```
+
+## PowerShell Smoke‑Tests (Kurz)
+
+```
+$BASE = gcloud run services describe drivesorter-api --region europe-west6 --format 'value(status.url)'
+Invoke-RestMethod -Uri "$BASE/version"
+Invoke-RestMethod -Uri "$BASE/readyz" | ConvertTo-Json -Depth 5
+
+# Session (Cookie setzen)
+$session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+$KEY = '<dein_access_key>'
+Invoke-RestMethod -Uri "$BASE/api/session" -Method Post -ContentType 'application/json' -Body (@{ accessKey = $KEY } | ConvertTo-Json) -WebSession $session
+
+# Me/Profiles
+Invoke-RestMethod -Uri "$BASE/api/me"       -WebSession $session | ConvertTo-Json -Depth 5
+Invoke-RestMethod -Uri "$BASE/api/profiles" -WebSession $session | ConvertTo-Json -Depth 5
+```

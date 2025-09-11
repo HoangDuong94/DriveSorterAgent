@@ -1,7 +1,7 @@
 const { v4: uuidv4 } = require('uuid');
 const { Storage } = require('@google-cloud/storage');
 const { runSorter } = require('./driveSorter');
-const { loadUserConfig } = require('./configStore');
+const { loadUserConfig, getProfile } = require('./configStore');
 const crypto = require('crypto');
 
 const storage = new Storage();
@@ -40,26 +40,43 @@ async function appendLog(runId, entry) {
   }
 }
 
-async function startDryRun({ email, accessKeyHash }) {
-  const cfg = await loadUserConfig(email);
-  if (!cfg) return { ok: false, error: 'config-not-found' };
+async function startDryRun({ email, profileId, ownerHash, accessKeyHash }) {
+  let cfg = null;
+  let metaExtra = {};
+  if (profileId) {
+    if (!ownerHash) return { ok: false, error: 'config-not-found' };
+    const profile = await getProfile(ownerHash, profileId);
+    if (!profile) return { ok: false, error: 'config-not-found' };
+    cfg = {
+      sourceFolderId: profile.sourceFolderId,
+      targetRootFolderId: profile.targetRootFolderId,
+      gcsPrefix: profile.gcsPrefix || `users/${ownerHash}`,
+    };
+    metaExtra = { ownerHash, profileId };
+  } else if (email) {
+    cfg = await loadUserConfig(email);
+    if (!cfg) return { ok: false, error: 'config-not-found' };
+    metaExtra = { email };
+  } else {
+    return { ok: false, error: 'config-not-found' };
+  }
   const runId = `run_${new Date().toISOString()}_${uuidv4().slice(0,8)}`;
   try {
     // Ensure logs file exists
     await storage.bucket(BUCKET).file(`runs/${runId}/logs.ndjson`).save('', { resumable: false, contentType: 'application/x-ndjson' });
-    await writeStatus(runId, { ok: true, runId, state: 'running', mode: 'dry', meta: { email, accessKeyHash } });
-    await appendLog(runId, { level: 'info', msg: 'dry-run started', email });
+    await writeStatus(runId, { ok: true, runId, state: 'running', mode: 'dry', meta: { ...metaExtra, accessKeyHash } });
+    await appendLog(runId, { level: 'info', msg: 'dry-run started', ...metaExtra });
     const summary = await runSorter({
       sourceFolderId: cfg.sourceFolderId,
       targetRootFolderId: cfg.targetRootFolderId,
       dryRun: true,
-      userEmail: email,
+      userEmail: email || null,
       gcsPrefix: cfg.gcsPrefix,
       onLog: (e) => appendLog(runId, { level: 'info', msg: e }),
       onProgress: (p) => writeStatus(runId, { ok: true, runId, state: 'running', mode: 'dry', progress: p }),
     });
     await writeStatus(runId, { ok: true, runId, state: 'succeeded', mode: 'dry', summary });
-    await appendLog(runId, { level: 'info', msg: 'dry-run finished', email });
+    await appendLog(runId, { level: 'info', msg: 'dry-run finished', ...metaExtra });
     return { ok: true, runId, summary, artifacts: [{ type: 'json', gcs: `gs://${BUCKET}/runs/${runId}/status.json` }] };
   } catch (e) {
     await writeStatus(runId, { ok: false, runId, state: 'failed', mode: 'dry', error: e.message });
@@ -68,27 +85,44 @@ async function startDryRun({ email, accessKeyHash }) {
   }
 }
 
-async function startRun({ email, accessKeyHash }) {
-  const cfg = await loadUserConfig(email);
-  if (!cfg) return { ok: false, error: 'config-not-found' };
+async function startRun({ email, profileId, ownerHash, accessKeyHash }) {
+  let cfg = null;
+  let metaExtra = {};
+  if (profileId) {
+    if (!ownerHash) return { ok: false, error: 'config-not-found' };
+    const profile = await getProfile(ownerHash, profileId);
+    if (!profile) return { ok: false, error: 'config-not-found' };
+    cfg = {
+      sourceFolderId: profile.sourceFolderId,
+      targetRootFolderId: profile.targetRootFolderId,
+      gcsPrefix: profile.gcsPrefix || `users/${ownerHash}`,
+    };
+    metaExtra = { ownerHash, profileId };
+  } else if (email) {
+    cfg = await loadUserConfig(email);
+    if (!cfg) return { ok: false, error: 'config-not-found' };
+    metaExtra = { email };
+  } else {
+    return { ok: false, error: 'config-not-found' };
+  }
   const runId = `run_${new Date().toISOString()}_${uuidv4().slice(0,8)}`;
   (async () => {
     try {
       // Ensure logs file exists
       await storage.bucket(BUCKET).file(`runs/${runId}/logs.ndjson`).save('', { resumable: false, contentType: 'application/x-ndjson' });
-      await writeStatus(runId, { ok: true, runId, state: 'running', mode: 'run', meta: { email, accessKeyHash } });
-      await appendLog(runId, { level: 'info', msg: 'run started', email });
+      await writeStatus(runId, { ok: true, runId, state: 'running', mode: 'run', meta: { ...metaExtra, accessKeyHash } });
+      await appendLog(runId, { level: 'info', msg: 'run started', ...metaExtra });
       const summary = await runSorter({
         sourceFolderId: cfg.sourceFolderId,
         targetRootFolderId: cfg.targetRootFolderId,
         dryRun: false,
-        userEmail: email,
+        userEmail: email || null,
         gcsPrefix: cfg.gcsPrefix,
         onLog: (e) => appendLog(runId, { level: 'info', msg: e }),
         onProgress: (p) => writeStatus(runId, { ok: true, runId, state: 'running', mode: 'run', progress: p }),
       });
       await writeStatus(runId, { ok: true, runId, state: 'succeeded', mode: 'run', summary });
-      await appendLog(runId, { level: 'info', msg: 'run finished', email });
+      await appendLog(runId, { level: 'info', msg: 'run finished', ...metaExtra });
     } catch (e) {
       await writeStatus(runId, { ok: false, runId, state: 'failed', mode: 'run', error: e.message });
       await appendLog(runId, { level: 'error', msg: 'run failed', error: e.message });

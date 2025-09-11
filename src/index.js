@@ -543,8 +543,10 @@ async function main() {
     skipped: 0,
     errors: 0,
     details: [],
+    preview: [],
     counts: { pdf_parse: 0, gcs_ocr: 0, gcs_ocr_image: 0, duplicates: 0 }
   };
+  const pushPreview = (item) => { try { summary.preview.push(item); } catch {} };
   const foldersContext = await buildTargetInventoryText(
     drive,
     TARGET_ROOT_FOLDER_ID,
@@ -598,6 +600,17 @@ async function main() {
             summary.processed += 1;
             try { summary.counts.duplicates += 1; } catch {}
             summary.details.push({ file: file.name, duplicate_of: duplicateOf.id });
+            // preview: duplicate with policy
+            pushPreview({
+              fileId: file.id,
+              originalName: file.name,
+              mime,
+              detected: (pdfNaming.extractMetadataFromText ? pdfNaming.extractMetadataFromText(ocrText) : {}),
+              proposed: null,
+              exists: {},
+              duplicateOf: { fileId: duplicateOf.id, originalName: duplicateOf.name },
+              policy: policy || 'skip'
+            });
             continue;
           }
 
@@ -713,6 +726,23 @@ async function main() {
               gcs: res ? { inputObject: res.inputObject, outputPrefix: res.outputPrefix } : undefined
             });
           }
+          pushPreview({
+            fileId: file.id,
+            originalName: file.name,
+            mime,
+            detected: meta,
+            proposed: {
+              year: String(year),
+              subfolder,
+              newFilename,
+              transcriptName,
+              wouldMoveTo: `${year}/${subfolder}/Scan/${newFilename}`,
+              wouldWriteTranscriptTo: `${year}/${subfolder}/Texttranskript/${transcriptName}`,
+            },
+            exists,
+            duplicateOf: null,
+            policy: null,
+          });
           if (res) {
             try {
               const outPrefix = (res.outputPrefix || '').replace(/^gs:\/\/[a-z0-9\-]+\//i, '');
@@ -804,6 +834,16 @@ async function main() {
               try { if (resImg.bucket && resImg.inputObject) await gcsVision.deleteGcsObject(resImg.bucket, resImg.inputObject); } catch {}
               summary.processed += 1; try { summary.counts.duplicates += 1; } catch {}
               summary.details.push({ file: file.name, duplicate_of: duplicateOf.id });
+              pushPreview({
+                fileId: file.id,
+                originalName: file.name,
+                mime,
+                detected: (pdfNaming.extractMetadataFromText ? pdfNaming.extractMetadataFromText(ocrText) : {}),
+                proposed: null,
+                exists: {},
+                duplicateOf: { fileId: duplicateOf.id, originalName: duplicateOf.name },
+                policy: policy || 'skip'
+              });
               continue;
             }
 
@@ -1001,6 +1041,23 @@ async function main() {
               llm_prompt: promptWithExamplesOther
             });
           }
+          pushPreview({
+            fileId: file.id,
+            originalName: file.name,
+            mime,
+            detected: {},
+            proposed: {
+              year: String(year),
+              subfolder,
+              newFilename,
+              transcriptName,
+              wouldMoveTo: `${year}/${subfolder}/Scan/${newFilename}`,
+              wouldWriteTranscriptTo: `${year}/${subfolder}/Texttranskript/${transcriptName}`,
+            },
+            exists,
+            duplicateOf: null,
+            policy: null,
+          });
           try { pushExample(year, subfolder, newFilename); } catch {}
           summary.processed += 1;
           summary.details.push({ file: file.name, planned: `${year}/${subfolder}/Scan/${newFilename}` });

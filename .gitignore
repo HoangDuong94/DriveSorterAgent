@@ -18,6 +18,8 @@ tmp/
 .cache/
 dist/
 coverage/
+cookie*.txt
+package.json.tmp
 
 # OS / IDE
 .DS_Store
