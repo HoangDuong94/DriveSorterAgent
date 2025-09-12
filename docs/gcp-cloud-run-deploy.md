@@ -108,7 +108,7 @@ gcloud run deploy drivesorter-api \
   --allow-unauthenticated \
   --set-env-vars=GCP_PROJECT_ID=dokumenten-agent,REGION=europe-west6,\
 GCS_BUCKET=drive-sorter-agent-pdf-inbox-837493,GCS_PREFIX=,DS_VERSION=2025-09-10,\
-ACCESS_KEYS_SOURCE=secret,ACCESS_KEYS_SECRET_NAME=drivesorter-access-keys,OPENAI_MODEL=gpt-4.1 \
+ACCESS_KEYS_SOURCE=secret,ACCESS_KEYS_SECRET_NAME=drivesorter-access-keys,OPENAI_MODEL=gpt-4.1,CORS_ORIGIN=http://localhost:3001 \
   --set-secrets OPENAI_API_KEY=openai-api-key:latest \
   --cpu=1 --memory=2Gi --concurrency=10 --min-instances=0 --timeout=900
 ```
@@ -191,7 +191,7 @@ gcloud run deploy $SERVICE `
   --region $REGION `
   --service-account $SA `
   --allow-unauthenticated `
-  --set-env-vars "GCP_PROJECT_ID=$PROJECT,REGION=$REGION,GCS_BUCKET=$BUCKET,GCS_PREFIX=,DS_VERSION=$DS_VERSION,ACCESS_KEYS_SOURCE=secret,ACCESS_KEYS_SECRET_NAME=drivesorter-access-keys,OPENAI_MODEL=gpt-4.1,COOKIE_SECURE=1" `
+  --set-env-vars "GCP_PROJECT_ID=$PROJECT,REGION=$REGION,GCS_BUCKET=$BUCKET,GCS_PREFIX=,DS_VERSION=$DS_VERSION,ACCESS_KEYS_SOURCE=secret,ACCESS_KEYS_SECRET_NAME=drivesorter-access-keys,OPENAI_MODEL=gpt-4.1,COOKIE_SECURE=1,CORS_ORIGIN=http://localhost:3001" `
   --set-secrets OPENAI_API_KEY=openai-api-key:latest `
   --cpu=1 --memory=2Gi --concurrency=10 --min-instances=0 --timeout=900
 ```

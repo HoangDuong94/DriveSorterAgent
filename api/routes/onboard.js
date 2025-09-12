@@ -4,6 +4,22 @@ const { buildTargetInventoryText } = require('../../src/utils/inventory');
 const { loadConfig } = require('../../src/utils/config');
 
 module.exports = async function (app) {
+  // Whoami: return service identity (ADC) for UI help
+  app.get('/whoami', async (req, reply) => {
+    try {
+      const drive = await initDriveUsingADC();
+      try {
+        const about = await drive.about.get({ fields: 'user(emailAddress)', supportsAllDrives: true });
+        const email = about && about.data && about.data.user && about.data.user.emailAddress || null;
+        return reply.send({ email: email || null, principalType: 'service-account' });
+      } catch (e) {
+        return reply.send({ email: null, principalType: 'service-account' });
+      }
+    } catch (e) {
+      app.log.error({ err: e }, 'whoami-failed');
+      return reply.code(500).send({ error: { code: 500, message: 'internal', detail: e.message } });
+    }
+  });
   // Resolve: id|url|name -> folder info + capabilities
   app.get('/resolve', async (req, reply) => {
     try {

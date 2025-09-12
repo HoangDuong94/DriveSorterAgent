@@ -5,12 +5,17 @@ const crypto = require('crypto');
 async function buildServer() {
   const app = fastifyFactory({ logger: true });
 
-  // CORS for PWA usage
+  // CORS for PWA usage (v2: exact origin + credentials)
+  const allowedOrigin = process.env.CORS_ORIGIN || 'http://localhost:3001';
   await app.register(require('@fastify/cors'), {
-    origin: true,
+    origin: (origin, cb) => {
+      // allow SSR/no-origin and exact configured origin
+      if (!origin || origin === allowedOrigin) return cb(null, true);
+      return cb(new Error('CORS'), false);
+    },
     credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'X-Access-Key']
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type']
   });
 
   // Cookie support (session via HttpOnly cookie)
@@ -18,18 +23,17 @@ async function buildServer() {
     secret: process.env.COOKIE_SECRET || undefined,
     hook: 'onRequest',
     parseOptions: {
-      sameSite: 'lax',
+      sameSite: 'none',
       secure: process.env.COOKIE_SECURE === '1',
       httpOnly: true,
       path: '/',
     },
   });
 
-  // Auth hook (accepts header X-Access-Key OR cookie ds_session)
+  // Auth hook (v2): ONLY ds_session cookie, no header fallback
   app.addHook('onRequest', async (req, reply) => {
     if (['/healthz', '/readyz', '/version', '/api/session'].includes(req.url)) return;
-
-    const provided = req.headers['x-access-key'] || (req.cookies && (req.cookies.ds_session || req.cookies['ds_session']));
+    const provided = req.cookies && (req.cookies.ds_session || req.cookies['ds_session']);
     if (!provided) return reply.code(401).send({ error: { code: 401, message: 'unauthorized' } });
 
     try {
@@ -74,12 +78,15 @@ async function buildServer() {
       }
       if (!valid) return reply.code(403).send({ error: { code: 403, message: 'forbidden' } });
 
-      reply.setCookie('ds_session', accessKey, {
+      const cookieOpts = {
         httpOnly: true,
-        sameSite: 'lax',
+        sameSite: 'none',
         secure: process.env.COOKIE_SECURE === '1',
         path: '/',
-      });
+        maxAge: 60 * 60 * 24 * 7,
+      };
+      if (process.env.COOKIE_PARTITIONED === '1') cookieOpts.partitioned = true;
+      reply.setCookie('ds_session', accessKey, cookieOpts);
       return reply.send({ ok: true });
     } catch (e) {
       req.log.error({ err: e }, 'session-init failed');

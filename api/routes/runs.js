@@ -8,9 +8,7 @@ module.exports = async function (app) {
     const body = req.body || {};
     const { email, profileId } = body;
     if (!email && !profileId) return reply.code(422).send({ error: { code: 422, message: 'missing-fields', detail: 'profileId|email' } });
-    const headerKey = req.headers['x-access-key'];
-    const cookieKey = req.cookies && (req.cookies.ds_session || req.cookies['ds_session']);
-    const accessKey = headerKey || cookieKey;
+    const accessKey = req.accessKey || null;
     const accessKeyHash = accessKey ? sha256Hex(accessKey) : null;
     const ownerHash = req.ownerHash || (accessKey ? sha256Hex(accessKey) : null);
     const res = await runs.startDryRun({ email, profileId, ownerHash, accessKeyHash });
@@ -25,9 +23,7 @@ module.exports = async function (app) {
     const body = req.body || {};
     const { email, profileId } = body;
     if (!email && !profileId) return reply.code(422).send({ error: { code: 422, message: 'missing-fields', detail: 'profileId|email' } });
-    const headerKey = req.headers['x-access-key'];
-    const cookieKey = req.cookies && (req.cookies.ds_session || req.cookies['ds_session']);
-    const accessKey = headerKey || cookieKey;
+    const accessKey = req.accessKey || null;
     const accessKeyHash = accessKey ? sha256Hex(accessKey) : null;
     const ownerHash = req.ownerHash || (accessKey ? sha256Hex(accessKey) : null);
     const res = await runs.startRun({ email, profileId, ownerHash, accessKeyHash });
@@ -44,12 +40,10 @@ module.exports = async function (app) {
     return reply.send(st);
   });
 
-  // List recent runs for current access key
+  // List recent runs for current access key (cookie session only)
   app.get('/runs', async (req, reply) => {
     try {
-      const headerKey = req.headers['x-access-key'];
-      const cookieKey = req.cookies && (req.cookies.ds_session || req.cookies['ds_session']);
-      const accessKey = headerKey || cookieKey;
+      const accessKey = req.accessKey || null;
       if (!accessKey) return reply.code(401).send({ error: { code: 401, message: 'unauthorized' } });
       const accessKeyHash = sha256Hex(accessKey);
       let limit = Number(req.query && req.query.limit || 20);
@@ -63,15 +57,13 @@ module.exports = async function (app) {
     }
   });
 
-  // New: Signed artifact URLs
+  // New: Signed artifact URLs (session cookie only)
   app.get('/runs/:runId/artifacts', async (req, reply) => {
     const runId = req.params.runId;
     let ttlSec = Number(req.query.ttlSec || 3600);
     if (!Number.isFinite(ttlSec)) ttlSec = 3600;
     ttlSec = Math.max(60, Math.min(86400, Math.floor(ttlSec)));
-    const headerKey = req.headers['x-access-key'];
-    const cookieKey = req.cookies && (req.cookies.ds_session || req.cookies['ds_session']);
-    const accessKey = headerKey || cookieKey;
+    const accessKey = req.accessKey || null;
     const accessKeyHash = accessKey ? sha256Hex(accessKey) : null;
     try {
       const out = await runs.getArtifactsSignedUrls(runId, ttlSec, accessKeyHash);
