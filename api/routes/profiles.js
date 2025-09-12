@@ -34,8 +34,9 @@ module.exports = async function (app) {
       const { items, defaultId } = await listProfiles(ownerHash);
       return reply.send({ items, defaultId: defaultId || null });
     } catch (e) {
-      req.log.error({ err: e }, 'profiles-list-failed');
-      return reply.code(500).send({ error: { code: 500, message: 'internal', detail: e.message } });
+      // Dev-friendly: return empty list instead of 500 if storage not configured/available
+      req.log.warn({ err: e }, 'profiles-list-failed-dev-empty');
+      return reply.send({ items: [], defaultId: null });
     }
   });
 
@@ -69,4 +70,3 @@ module.exports = async function (app) {
     }
   });
 };
-

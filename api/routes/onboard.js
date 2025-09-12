@@ -9,11 +9,11 @@ module.exports = async function (app) {
     try {
       const drive = await initDriveUsingADC();
       try {
-        const about = await drive.about.get({ fields: 'user(emailAddress)', supportsAllDrives: true });
-        const email = about && about.data && about.data.user && about.data.user.emailAddress || null;
-        return reply.send({ email: email || null, principalType: 'service-account' });
+        const about = await drive.about.get({ fields: 'user(emailAddress,displayName)', supportsAllDrives: true });
+        const user = about && about.data && about.data.user || {};
+        return reply.send({ email: user.emailAddress || null, displayName: user.displayName || undefined, principalType: 'service_account' });
       } catch (e) {
-        return reply.send({ email: null, principalType: 'service-account' });
+        return reply.send({ email: null, principalType: 'service_account' });
       }
     } catch (e) {
       app.log.error({ err: e }, 'whoami-failed');
@@ -34,12 +34,15 @@ module.exports = async function (app) {
           supportsAllDrives: true,
         });
         const f = r.data;
+        const canEdit = !!(f.capabilities && f.capabilities.canEdit);
+        const canAddChildren = !!(f.capabilities && f.capabilities.canAddChildren);
         return {
           id: f.id,
           name: f.name,
           mimeType: f.mimeType,
-          canEdit: !!(f.capabilities && f.capabilities.canEdit),
-          canAddChildren: !!(f.capabilities && f.capabilities.canAddChildren),
+          canEdit,
+          canAddChildren,
+          access: (canEdit && canAddChildren) ? 'editor' : 'reader',
         };
       }
 
@@ -97,12 +100,15 @@ module.exports = async function (app) {
             supportsAllDrives: true,
           });
           const f = r.data;
+          const canEdit = !!(f.capabilities && f.capabilities.canEdit);
+          const canAddChildren = !!(f.capabilities && f.capabilities.canAddChildren);
           return {
             id: f.id,
             name: f.name,
             mimeType: f.mimeType,
-            canEdit: !!(f.capabilities && f.capabilities.canEdit),
-            canAddChildren: !!(f.capabilities && f.capabilities.canAddChildren),
+            canEdit,
+            canAddChildren,
+            access: (canEdit && canAddChildren) ? 'editor' : 'reader',
           };
         } catch (e) {
           const code = e.code || e.status || 500;

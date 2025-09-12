@@ -18,6 +18,7 @@ async function writeStatus(runId, obj) {
       try {
         const prev = JSON.parse(buf.toString('utf8'));
         if (prev && prev.meta && !obj.meta) obj.meta = prev.meta;
+        if (prev && prev.startedAt && !obj.startedAt) obj.startedAt = prev.startedAt;
       } catch {}
     }
   } catch {}
@@ -61,10 +62,12 @@ async function startDryRun({ email, profileId, ownerHash, accessKeyHash }) {
     return { ok: false, error: 'config-not-found' };
   }
   const runId = `run_${new Date().toISOString()}_${uuidv4().slice(0,8)}`;
+  const startedAt = new Date().toISOString();
+  const t0 = Date.now();
   try {
     // Ensure logs file exists
     await storage.bucket(BUCKET).file(`runs/${runId}/logs.ndjson`).save('', { resumable: false, contentType: 'application/x-ndjson' });
-    await writeStatus(runId, { ok: true, runId, state: 'running', mode: 'dry', meta: { ...metaExtra, accessKeyHash } });
+    await writeStatus(runId, { ok: true, runId, state: 'running', mode: 'dry', startedAt, meta: { ...metaExtra, accessKeyHash } });
     await appendLog(runId, { level: 'info', msg: 'dry-run started', ...metaExtra });
     const summary = await runSorter({
       sourceFolderId: cfg.sourceFolderId,
@@ -73,13 +76,17 @@ async function startDryRun({ email, profileId, ownerHash, accessKeyHash }) {
       userEmail: email || null,
       gcsPrefix: cfg.gcsPrefix,
       onLog: (e) => appendLog(runId, { level: 'info', msg: e }),
-      onProgress: (p) => writeStatus(runId, { ok: true, runId, state: 'running', mode: 'dry', progress: p }),
+      onProgress: (p) => writeStatus(runId, { ok: true, runId, state: 'running', mode: 'dry', startedAt, progress: p }),
     });
-    await writeStatus(runId, { ok: true, runId, state: 'succeeded', mode: 'dry', summary });
+    const finishedAt = new Date().toISOString();
+    const durationMs = Date.now() - t0;
+    await writeStatus(runId, { ok: true, runId, state: 'succeeded', mode: 'dry', startedAt, finishedAt, durationMs, summary });
     await appendLog(runId, { level: 'info', msg: 'dry-run finished', ...metaExtra });
     return { ok: true, runId, summary, artifacts: [{ type: 'json', gcs: `gs://${BUCKET}/runs/${runId}/status.json` }] };
   } catch (e) {
-    await writeStatus(runId, { ok: false, runId, state: 'failed', mode: 'dry', error: e.message });
+    const finishedAt = new Date().toISOString();
+    const durationMs = Date.now() - t0;
+    await writeStatus(runId, { ok: false, runId, state: 'failed', mode: 'dry', startedAt, finishedAt, durationMs, error: e.message });
     await appendLog(runId, { level: 'error', msg: 'dry-run failed', error: e.message });
     return { ok: false, error: 'run-error', detail: e.message, runId };
   }
@@ -106,11 +113,13 @@ async function startRun({ email, profileId, ownerHash, accessKeyHash }) {
     return { ok: false, error: 'config-not-found' };
   }
   const runId = `run_${new Date().toISOString()}_${uuidv4().slice(0,8)}`;
+  const startedAt = new Date().toISOString();
+  const t0 = Date.now();
   (async () => {
     try {
       // Ensure logs file exists
       await storage.bucket(BUCKET).file(`runs/${runId}/logs.ndjson`).save('', { resumable: false, contentType: 'application/x-ndjson' });
-      await writeStatus(runId, { ok: true, runId, state: 'running', mode: 'run', meta: { ...metaExtra, accessKeyHash } });
+      await writeStatus(runId, { ok: true, runId, state: 'running', mode: 'run', startedAt, meta: { ...metaExtra, accessKeyHash } });
       await appendLog(runId, { level: 'info', msg: 'run started', ...metaExtra });
       const summary = await runSorter({
         sourceFolderId: cfg.sourceFolderId,
@@ -119,12 +128,16 @@ async function startRun({ email, profileId, ownerHash, accessKeyHash }) {
         userEmail: email || null,
         gcsPrefix: cfg.gcsPrefix,
         onLog: (e) => appendLog(runId, { level: 'info', msg: e }),
-        onProgress: (p) => writeStatus(runId, { ok: true, runId, state: 'running', mode: 'run', progress: p }),
+        onProgress: (p) => writeStatus(runId, { ok: true, runId, state: 'running', mode: 'run', startedAt, progress: p }),
       });
-      await writeStatus(runId, { ok: true, runId, state: 'succeeded', mode: 'run', summary });
+      const finishedAt = new Date().toISOString();
+      const durationMs = Date.now() - t0;
+      await writeStatus(runId, { ok: true, runId, state: 'succeeded', mode: 'run', startedAt, finishedAt, durationMs, summary });
       await appendLog(runId, { level: 'info', msg: 'run finished', ...metaExtra });
     } catch (e) {
-      await writeStatus(runId, { ok: false, runId, state: 'failed', mode: 'run', error: e.message });
+      const finishedAt = new Date().toISOString();
+      const durationMs = Date.now() - t0;
+      await writeStatus(runId, { ok: false, runId, state: 'failed', mode: 'run', startedAt, finishedAt, durationMs, error: e.message });
       await appendLog(runId, { level: 'error', msg: 'run failed', error: e.message });
     }
   })();
@@ -199,18 +212,26 @@ async function listRunsByAccessKey(accessKeyHash, limit = 20) {
       if (!meta || meta.accessKeyHash !== accessKeyHash) continue;
       const parts = f.name.split('/');
       const runId = parts.length >= 2 ? parts[1] : null;
+      const logsFile = storage.bucket(BUCKET).file(`runs/${runId}/logs.ndjson`);
+      let hasLogs = false;
+      try { const [exists] = await logsFile.exists(); hasLogs = !!exists; } catch (_) {}
+      const counts = st.summary ? {
+        processed: Number(st.summary.processed || 0),
+        moved: Number(st.summary.moved || 0),
+        errors: Number(st.summary.errors || 0),
+      } : undefined;
+      const previewCount = st.summary && Array.isArray(st.summary.preview) ? st.summary.preview.length : undefined;
       out.push({
         runId,
-        state: st.state || null,
         mode: st.mode || null,
-        updatedAt: f.metadata?.updated || f.metadata?.timeCreated || null,
-        meta: { ownerHash: meta.ownerHash || null, profileId: meta.profileId || null, email: meta.email || null },
-        summary: st.summary ? {
-          processed: st.summary.processed || 0,
-          moved: st.summary.moved || 0,
-          errors: st.summary.errors || 0,
-          counts: st.summary.counts || undefined,
-        } : undefined,
+        state: st.state || null,
+        startedAt: st.startedAt || null,
+        finishedAt: st.finishedAt || undefined,
+        durationMs: st.durationMs || undefined,
+        counts,
+        previewCount,
+        hasLogs,
+        hasArtifacts: true,
       });
     } catch (_) { /* ignore malformed */ }
   }

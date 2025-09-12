@@ -5,17 +5,20 @@ const crypto = require('crypto');
 async function buildServer() {
   const app = fastifyFactory({ logger: true });
 
-  // CORS for PWA usage (v2: exact origin + credentials)
-  const allowedOrigin = process.env.CORS_ORIGIN || 'http://localhost:3001';
+  // CORS for PWA usage (v2: exact origin list + credentials)
+  const originList = (process.env.CORS_ORIGIN || 'http://localhost:3001')
+    .split(/[\s,]+/)
+    .filter(Boolean);
+  const allowedOrigins = new Set(originList);
   await app.register(require('@fastify/cors'), {
     origin: (origin, cb) => {
-      // allow SSR/no-origin and exact configured origin
-      if (!origin || origin === allowedOrigin) return cb(null, true);
+      // allow SSR/no-origin and exact configured origins
+      if (!origin || allowedOrigins.has(origin)) return cb(null, true);
       return cb(new Error('CORS'), false);
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type']
+    allowedHeaders: ['Content-Type'],
   });
 
   // Cookie support (session via HttpOnly cookie)

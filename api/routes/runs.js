@@ -6,12 +6,12 @@ module.exports = async function (app) {
 
   app.post('/dry-run', async (req, reply) => {
     const body = req.body || {};
-    const { email, profileId } = body;
-    if (!email && !profileId) return reply.code(422).send({ error: { code: 422, message: 'missing-fields', detail: 'profileId|email' } });
+    const { profileId } = body;
+    if (!profileId) return reply.code(422).send({ error: { code: 422, message: 'missing-fields', detail: 'profileId' } });
     const accessKey = req.accessKey || null;
     const accessKeyHash = accessKey ? sha256Hex(accessKey) : null;
     const ownerHash = req.ownerHash || (accessKey ? sha256Hex(accessKey) : null);
-    const res = await runs.startDryRun({ email, profileId, ownerHash, accessKeyHash });
+    const res = await runs.startDryRun({ email: null, profileId, ownerHash, accessKeyHash });
     if (!res.ok) {
       const status = res.error === 'config-not-found' ? 404 : 500;
       return reply.code(status).send(res);
@@ -21,12 +21,12 @@ module.exports = async function (app) {
 
   app.post('/run', async (req, reply) => {
     const body = req.body || {};
-    const { email, profileId } = body;
-    if (!email && !profileId) return reply.code(422).send({ error: { code: 422, message: 'missing-fields', detail: 'profileId|email' } });
+    const { profileId } = body;
+    if (!profileId) return reply.code(422).send({ error: { code: 422, message: 'missing-fields', detail: 'profileId' } });
     const accessKey = req.accessKey || null;
     const accessKeyHash = accessKey ? sha256Hex(accessKey) : null;
     const ownerHash = req.ownerHash || (accessKey ? sha256Hex(accessKey) : null);
-    const res = await runs.startRun({ email, profileId, ownerHash, accessKeyHash });
+    const res = await runs.startRun({ email: null, profileId, ownerHash, accessKeyHash });
     if (!res.ok) {
       const status = res.error === 'config-not-found' ? 404 : 500;
       return reply.code(status).send(res);
