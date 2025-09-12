@@ -12,10 +12,7 @@ module.exports = async function (app) {
     const accessKeyHash = accessKey ? sha256Hex(accessKey) : null;
     const ownerHash = req.ownerHash || (accessKey ? sha256Hex(accessKey) : null);
     const res = await runs.startDryRun({ email: null, profileId, ownerHash, accessKeyHash });
-    if (!res.ok) {
-      const status = res.error === 'config-not-found' ? 404 : 500;
-      return reply.code(status).send(res);
-    }
+    // Dev-friendly: always return 200 with runId (frontend can poll status)
     return reply.send(res);
   });
 

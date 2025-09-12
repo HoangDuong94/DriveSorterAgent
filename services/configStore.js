@@ -3,6 +3,15 @@ const { Storage } = require('@google-cloud/storage');
 const { v4: uuidv4 } = require('uuid');
 
 const BUCKET = process.env.GCS_BUCKET;
+const DEV_FAKE = process.env.DEV_PROFILES_FAKE === '1';
+
+// In-memory fallback for dev to avoid 500 when bucket missing/inaccessible
+const mem = new Map(); // ownerHash -> { items: Map(id->profile), defaultId }
+
+function memEnsure(ownerHash) {
+  if (!mem.has(ownerHash)) mem.set(ownerHash, { items: new Map(), defaultId: null });
+  return mem.get(ownerHash);
+}
 
 function emailHash(email) {
   return crypto.createHash('sha256').update(String(email).toLowerCase()).digest('hex');
@@ -48,9 +57,7 @@ function defaultPath(ownerHash) {
 }
 
 async function saveProfile({ ownerHash, profile }) {
-  if (!BUCKET) throw new Error('GCS_BUCKET not configured');
   if (!ownerHash) throw new Error('ownerHash required');
-  const storage = new Storage();
   const id = (profile && profile.id) ? String(profile.id) : `pr_${uuidv4().slice(0,8)}`;
   const now = new Date().toISOString();
   const data = {
@@ -62,12 +69,23 @@ async function saveProfile({ ownerHash, profile }) {
     gcsPrefix: `users/${ownerHash}`,
     updatedAt: now,
   };
+  if (DEV_FAKE) {
+    const st = memEnsure(ownerHash);
+    st.items.set(id, data);
+    return data;
+  }
+  if (!BUCKET) throw new Error('GCS_BUCKET not configured');
+  const storage = new Storage();
   const file = storage.bucket(BUCKET).file(profilePath(ownerHash, id));
   await file.save(JSON.stringify(data, null, 2), { contentType: 'application/json' });
   return data;
 }
 
 async function listProfiles(ownerHash) {
+  if (DEV_FAKE) {
+    const st = memEnsure(ownerHash);
+    return { items: Array.from(st.items.values()), defaultId: st.defaultId };
+  }
   if (!BUCKET) throw new Error('GCS_BUCKET not configured');
   const storage = new Storage();
   const [files] = await storage.bucket(BUCKET).getFiles({ prefix: `configs/owners/${ownerHash}/profiles/` });
@@ -92,6 +110,11 @@ async function listProfiles(ownerHash) {
 }
 
 async function setDefaultProfile(ownerHash, id) {
+  if (DEV_FAKE) {
+    const st = memEnsure(ownerHash);
+    st.defaultId = String(id);
+    return { id: st.defaultId, updatedAt: new Date().toISOString() };
+  }
   if (!BUCKET) throw new Error('GCS_BUCKET not configured');
   const storage = new Storage();
   const file = storage.bucket(BUCKET).file(defaultPath(ownerHash));
@@ -101,6 +124,10 @@ async function setDefaultProfile(ownerHash, id) {
 }
 
 async function getDefaultProfileId(ownerHash) {
+  if (DEV_FAKE) {
+    const st = memEnsure(ownerHash);
+    return st.defaultId || null;
+  }
   if (!BUCKET) throw new Error('GCS_BUCKET not configured');
   const storage = new Storage();
   const file = storage.bucket(BUCKET).file(defaultPath(ownerHash));
@@ -114,6 +141,10 @@ async function getDefaultProfileId(ownerHash) {
 }
 
 async function getProfile(ownerHash, id) {
+  if (DEV_FAKE) {
+    const st = memEnsure(ownerHash);
+    return st.items.get(String(id)) || null;
+  }
   if (!BUCKET) throw new Error('GCS_BUCKET not configured');
   const storage = new Storage();
   const file = storage.bucket(BUCKET).file(profilePath(ownerHash, id));
